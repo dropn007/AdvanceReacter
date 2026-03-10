@@ -99,7 +99,3 @@ POST /target → Multipart Payload → Flight Deserialization → Prototype Poll
 ## Disclaimer
 
 This tool is intended for **authorized penetration testing** and **CTF competitions** only. Unauthorized access to computer systems is illegal. The authors are not responsible for misuse.
-
-## License
-
-MIT
