@@ -1166,8 +1166,13 @@ class AdvancedShell:
                                 else:print(f"{R}cd failed{W}")
                             elif o:print(o)
                     else:
-                        out=self.execute(cmd);self.last_output=out or ""
+                        # Auto-append 2>&1 to capture stderr (security tools often use stderr)
+                        run_cmd=cmd
+                        if '2>&1' not in cmd and '2>nul' not in cmd and '2>/dev/null' not in cmd:
+                            run_cmd=cmd+' 2>&1'
+                        out=self.execute(run_cmd);self.last_output=out or ""
                         if out:print(out)
+                        else:print(f"{Y}[*] Command ran but produced no output{W}")
                 except KeyboardInterrupt:print(f"\n{Y}Use .exit to quit{W}")
                 except EOFError:break
                 except Exception as e:print(f"{R}Error: {e}{W}")
